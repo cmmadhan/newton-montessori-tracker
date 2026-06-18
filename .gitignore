@@ -1,0 +1,28 @@
+# Backup files
+*.backup-*.html
+index_V*.html
+
+# Documents & PDFs
+*.pdf
+*.docx
+*.csv
+
+# Airtable backup exports
+backups/
+import_package/
+import_package_v*/
+
+# System files
+.DS_Store
+.htaccess
+.htpasswd
+
+# Other HTML files (keep only index.html)
+architecture-*.html
+
+# GitHub setup scripts (contain credentials — keep local only)
+setup-github.sh
+auto-push.sh
+autopush.log
+*.command
+*.py
