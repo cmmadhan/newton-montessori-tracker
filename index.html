@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Newton Montessori — Record Progress</title>
+<link rel="icon" href="https://newtonmontessori.care/favicon.ico" type="image/x-icon">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
 <style>
   :root {
@@ -648,9 +649,10 @@
   <button id="logout-btn" onclick="logout()" style="display:none;margin-left:8px;padding:4px 10px;font-size:11px;font-weight:600;border:1.5px solid #E0E0E0;border-radius:8px;background:white;color:#888;cursor:pointer" title="Sign out">Sign out</button>
   <div class="mode-tabs" id="mode-tabs" style="display:none">
     <button class="mode-tab active" id="tab-progress">📋 Log & Track</button>
-    <button class="mode-tab" id="tab-books"       style="display:none">📚 Books Catalog</button>
-    <button class="mode-tab" id="tab-materials"   style="display:none">🧩 Materials Catalog</button>
-    <button class="mode-tab" id="tab-log"         style="display:none">📋 Daily Log</button>
+    <button class="mode-tab" id="tab-books"         style="display:none">📚 Books Catalog</button>
+    <button class="mode-tab" id="tab-materials"     style="display:none">🧩 Materials Catalog</button>
+    <button class="mode-tab" id="tab-log"           style="display:none">📊 Progress Tracker</button>
+    <button class="mode-tab" id="tab-lesson-plans"  style="display:none">📅 Lesson Plans</button>
     <button class="mode-tab" id="tab-admin"       style="display:none">⚙️ Admin</button>
   </div>
 </div>
@@ -670,6 +672,7 @@ const TABLES = {
   readingLog:  'tblaMqpcRbUR4lj3h',
   books:       'tblOKYjqhMil4jZaX',
   materials:   'tblju8KFxDF5IvrbE',
+  lessonPlans: 'tblOv4iSvnss1LL0N',
 };
 const FIELD = {
   // Students
@@ -734,6 +737,15 @@ const FIELD = {
   rlStudent:        'fldxEBefLURbTuVr4',
   rlBook:           'fldcwKb2EanV7wZSf',
   rlRecordedBy:     'fld9dfILED24zlJTZ',
+  // Lesson Plans
+  lpTitle:          'fldddYQ2iFToLkysR',
+  lpStart:          'fldBzpb8lREO8jPj6',
+  lpEnd:            'fldJN5CJIAlUGMqe8',
+  lpJson:           'fldL0Zxu9Hsw2TrNT',
+  lpCreatedDate:    'fldTxeKVRioSWZSMH',
+  lpRevisionNotes:  'fld8Xbvvbg8dVzh10',
+  lpStudent:        'fldMK9SxManl3CeKk',
+  lpCreatedBy:      'fldNxjV8P8ygUYaaQ',
   // Materials Catalog
   matName:          'fldNyj9pRl9HMYmUA',
   matId:            'fldV1AWiJajmHviSZ',
@@ -858,6 +870,53 @@ let state = {
   logStudentId: null,
   logData:      null,
   logLoading:   false,
+  logChildFilter:       null,   // selected student ID for child filter
+  logChildSearch:       '',     // search text in child dropdown
+  logChildDropdownOpen: false,  // child dropdown open state
+  logSection1Open: true,        // Daily Log accordion section open
+  logSection2Open: false,       // Progress Grid accordion section open
+  // Lesson Plan state
+  lpStudentId:      null,
+  lpModal:          false,
+  lpStartDate:      '',
+  lpData:           null,
+  lpLoading:        false,
+  lpSaving:         false,
+  lpError:          '',
+  lpRevisionPrompt: '',
+  lpRevising:       false,
+  lpSavedPlanId:    null,
+  // Lesson Plans tab state
+  lpTabStudentId:      null,
+  lpTabPlanData:       null,
+  lpTabLoading:        false,
+  lpTabSaving:         false,
+  lpTabError:          '',
+  lpTabSavedPlanId:    null,
+  lpTabRevisionPrompt: '',
+  lpTabRevising:       false,
+  lpTabBgGenerating:   false, // background Claude generation in progress
+  lpTabBgLoading:      false, // bulk Airtable fetch in progress
+  lpTabPlansLoaded:    false, // true once bulk load has run this session
+  lpTabPlans:          {},   // cache: studentId → planData
+  lpTabDropdownOpen:   false,
+  lpTabSearch:         '',
+  // Divergence capture modal
+  lpDivModal:          false,
+  lpDivActId:          null,
+  lpDivStudentId:      null,
+  lpDivDate:           null,
+  lpDivSubject:        null,
+  lpDivPlannedActId:   null,
+  lpDivPlannedActName: '',
+  lpDivReason:         '',
+  lpDivReasonOther:    '',
+  lpDivPlanRecordId:   null,
+  lpDivPlanJson:       null,
+  // Progress Grid child filter
+  gridChildFilter:       null,
+  gridChildSearch:       '',
+  gridChildDropdownOpen: false,
   // Book Library state
   books:            [],
   booksLoaded:      false,
@@ -903,13 +962,14 @@ async function airtable(path, opts = {}) {
   return data;
 }
 
-async function fetchAll(tableId, fields, filterFormula) {
+async function fetchAll(tableId, fields, filterFormula, returnByFieldId = false) {
   let records = [], offset = null;
   do {
     const params = new URLSearchParams();
     if (offset) params.set('offset', offset);
     if (filterFormula) params.set('filterByFormula', filterFormula);
     params.set('pageSize', '100');
+    if (returnByFieldId) params.set('returnFieldsByFieldId', 'true');
     const data = await airtable(`${tableId}?${params}`);
     records = records.concat(data.records);
     offset = data.offset;
@@ -994,7 +1054,12 @@ async function loadData() {
       });
     } catch(e2) { state.staffById = {}; state.classroomNames = {}; }
 
-    state.screen = state.mode === 'review' ? 'review-select' : 'select-student';
+    // Only set the landing screen if still on the loading screen.
+    // If user navigated elsewhere (e.g. clicked a tab during load), preserve their choice.
+    if (state.screen === 'loading') {
+      state.screen  = 'review-select';
+      state.mode    = 'review';
+    }
   } catch(e) {
     state.error = e.message;
     state.screen = 'setup';
@@ -1081,6 +1146,17 @@ async function submitProgress() {
     state.successMsg = `Progress logged: ${state.selectedStudent.name} — ${state.selectedActivity.name} — ${state.selectedStatus}`;
     state.screen = 'success';
     state.submitting = false;
+
+    // Check for lesson plan divergence (non-blocking)
+    try {
+      await checkLessonPlanDivergence(
+        state.selectedStudent.id,
+        state.selectedActivity.id,
+        state.selectedActivity.name,
+        state.selectedActivity.subject || '',
+        recordDate
+      );
+    } catch(_divErr) {}
   } catch(e) {
     state.error = e.message;
     state.submitting = false;
@@ -1945,7 +2021,11 @@ function render() {
   }
   const tabLog = document.getElementById('tab-log');
   const tabRev = document.getElementById('tab-review');
-  if (tabLog) { tabLog.style.display = isAdmin ? '' : 'none'; tabLog.classList.toggle('active', state.mode === 'dailylog'); }
+  // Progress Tracker tab — visible to all roles
+  if (tabLog) { tabLog.style.display = ['setup','loading'].includes(state.screen) ? 'none' : ''; tabLog.classList.toggle('active', state.mode === 'dailylog'); }
+  // Lesson Plans tab — visible to all roles
+  const tabLp = document.getElementById('tab-lesson-plans');
+  if (tabLp) { tabLp.style.display = ['setup','loading'].includes(state.screen) ? 'none' : ''; tabLp.classList.toggle('active', state.mode === 'lesson-plans'); }
   if (tabRev) {
     tabRev.style.display = isAdmin ? '' : 'none';
     tabRev.classList.toggle('active', state.mode === 'review');
@@ -1969,7 +2049,7 @@ function render() {
   }
   // If a non-admin somehow lands on a restricted screen, redirect to review
   if (!isAdmin && ['trends-select','trends-picker','trends-map','trends-loading','admin',
-      'classroom-insights','school-overview','lesson-planner','assessments','daily-log'].includes(state.screen)) {
+      'classroom-insights','school-overview','lesson-planner','assessments'].includes(state.screen)) {
     state.screen = 'review-select'; state.mode = 'review';
   }
 
@@ -1994,6 +2074,7 @@ function render() {
   if (state.screen === 'school-overview')    { app.innerHTML = renderSchoolOverview();    setupHandlers(); return; }
   if (state.screen === 'lesson-planner')     { app.innerHTML = renderLessonPlanner();     setupHandlers(); return; }
   if (state.screen === 'assessments')        { app.innerHTML = renderAssessments();       setupHandlers(); return; }
+  if (state.screen === 'lesson-plans')       { app.innerHTML = renderLessonPlansTab();     setupHandlers(); return; }
   if (state.screen === 'daily-log')          { app.innerHTML = renderDailyLog();          setupHandlers(); return; }
   if (state.screen === 'books')              { app.innerHTML = renderBookLibrary();        setupHandlers(); return; }
   if (state.screen === 'materials')          { app.innerHTML = renderMaterialsCatalog();   setupHandlers(); return; }
@@ -2337,9 +2418,30 @@ function initHandlers() {
     state.promotionData = null;
     loadPromotionData();
   });
+  bind('tab-lesson-plans', () => {
+    state.mode = 'lesson-plans'; state.screen = 'lesson-plans';
+    state.lpTabDropdownOpen = false; state.lpTabSearch = '';
+    const _lpFirst = [...state.students]
+      .filter(s => !/\btest\b/i.test(s.name))
+      .sort((a,b) => a.name.localeCompare(b.name))[0];
+    if (_lpFirst && !state.lpTabStudentId) {
+      state.lpTabStudentId = _lpFirst.id;
+      state.lpTabPlanData = null; state.lpTabError = '';
+    }
+    render();
+    // Load all saved plans from Airtable in one call (first visit only).
+    // After that, only generate via Claude for students with no saved plan.
+    if (!state.lpTabPlansLoaded && !state.lpTabBgLoading) {
+      bulkLoadPlansFromAirtable().then(() => {
+        generateAllPlansBackground(null); // only generates for students still uncached
+      });
+    }
+    if (!state.globalSas) loadAllSasData().then(() => render());
+  });
   bind('tab-log', () => {
     state.mode = 'dailylog'; state.screen = 'daily-log';
     state.logStudentId = null;
+    state.logChildFilter = null; state.logChildSearch = ''; state.logChildDropdownOpen = false;
     if (!state.logDate) state.logDate = todayET();
     if (!state.logDateEnd) state.logDateEnd = state.logDate;
     state.logData = null;
@@ -2624,6 +2726,98 @@ function setupHandlers() {
     state.logStudentId = null;
     render();
   });
+  on('log-child-filter-input', 'click', () => {
+    state.logChildDropdownOpen = true; render();
+    setTimeout(() => { const el = document.getElementById('log-child-search'); if (el) el.focus(); }, 30);
+  });
+  on('log-child-search', 'input', function() {
+    state.logChildSearch = this.value; render();
+    setTimeout(() => { const el = document.getElementById('log-child-search'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 10);
+  });
+  on('log-child-clear', 'click', () => {
+    state.logChildFilter = null; state.logChildSearch = ''; state.logChildDropdownOpen = false; render();
+  });
+  on('log-child-banner-close', 'click', () => {
+    state.logChildFilter = null; state.logChildSearch = ''; state.logChildDropdownOpen = false; render();
+  });
+  document.querySelectorAll('[data-logchild]').forEach(el => {
+    el.addEventListener('click', () => {
+      state.logChildFilter = el.dataset.logchild;
+      state.logChildDropdownOpen = false; state.logChildSearch = ''; render();
+    });
+  });
+  // Close child dropdown when clicking outside
+  document.addEventListener('click', function logChildOutside(e) {
+    if (state.screen !== 'daily-log') { document.removeEventListener('click', logChildOutside); return; }
+    const wrap = document.getElementById('log-child-dropdown-wrap');
+    if (wrap && !wrap.contains(e.target) && e.target.id !== 'log-child-filter-input') {
+      if (state.logChildDropdownOpen) { state.logChildDropdownOpen = false; render(); }
+    }
+  }, true);
+
+  // ── Progress Grid child filter ────────────────────────────────────────
+  on('grid-child-filter-input', 'click', () => {
+    state.gridChildDropdownOpen = true; render();
+    setTimeout(() => { const el = document.getElementById('grid-child-search'); if (el) el.focus(); }, 30);
+  });
+  on('grid-child-search', 'input', function() {
+    state.gridChildSearch = this.value; render();
+    setTimeout(() => { const el = document.getElementById('grid-child-search'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 10);
+  });
+  on('grid-child-clear', 'click', () => {
+    state.gridChildFilter = null; state.gridChildSearch = ''; state.gridChildDropdownOpen = false; render();
+  });
+  document.querySelectorAll('[data-gridchild]').forEach(el => {
+    el.addEventListener('click', () => {
+      state.gridChildFilter = el.dataset.gridchild;
+      state.gridChildDropdownOpen = false; state.gridChildSearch = ''; render();
+    });
+  });
+  document.addEventListener('click', function gridChildOutside(e) {
+    if (state.screen !== 'daily-log') { document.removeEventListener('click', gridChildOutside); return; }
+    const wrap = document.getElementById('grid-child-dropdown-wrap');
+    if (wrap && !wrap.contains(e.target) && e.target.id !== 'grid-child-filter-input') {
+      if (state.gridChildDropdownOpen) { state.gridChildDropdownOpen = false; render(); }
+    }
+  }, true);
+
+  // ── Lesson Plans tab child dropdown ──────────────────────────────────
+  on('lp-tab-child-input', 'click', () => {
+    state.lpTabDropdownOpen = true; render();
+    setTimeout(() => { const el = document.getElementById('lp-tab-child-search'); if (el) el.focus(); }, 30);
+  });
+  on('lp-tab-child-search', 'input', function() {
+    state.lpTabSearch = this.value; render();
+    setTimeout(() => { const el = document.getElementById('lp-tab-child-search'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 10);
+  });
+  document.querySelectorAll('[data-lptabchild]').forEach(el => {
+    el.addEventListener('click', () => {
+      const sid = el.dataset.lptabchild;
+      state.lpTabDropdownOpen = false; state.lpTabSearch = '';
+      state.lpTabStudentId  = sid;
+      state.lpTabRevisionPrompt = '';
+      // Use cached plan if available — instant switch; else generate
+      if (state.lpTabPlans[sid]) {
+        state.lpTabPlanData    = state.lpTabPlans[sid];
+        state.lpTabError       = '';
+        state.lpTabSavedPlanId = null;
+        render();
+      } else {
+        state.lpTabPlanData    = null;
+        state.lpTabError       = '';
+        state.lpTabSavedPlanId = null;
+        render();
+        generateLessonPlan(sid);
+      }
+    });
+  });
+  document.addEventListener('click', function lpTabChildOutside(e) {
+    if (state.screen !== 'lesson-plans') { document.removeEventListener('click', lpTabChildOutside); return; }
+    const wrap = document.getElementById('lp-tab-child-wrap');
+    if (wrap && !wrap.contains(e.target) && e.target.id !== 'lp-tab-child-input') {
+      if (state.lpTabDropdownOpen) { state.lpTabDropdownOpen = false; render(); }
+    }
+  }, true);
 
   // ── Book search — avoid re-render on every keystroke (focus loss fix) ──
   const bookSearchEl = document.getElementById('book-search');
@@ -4610,27 +4804,28 @@ function renderDailyLog() {
   // ── date defaults ────────────────────────────────────────────────────
   if (!state.logDate) state.logDate = todayET();
   if (!state.logDateEnd) state.logDateEnd = state.logDate;
+  if (!state.lpStartDate) state.lpStartDate = todayET();
   const dateFrom = state.logDate;
   const dateTo   = state.logRangeMode ? state.logDateEnd : dateFrom;
 
   // ── loading state ────────────────────────────────────────────────────
   if (state.logLoading) {
     return `<div class="main p2-screen">
-      <div class="p2-title">📋 Daily Log</div>
+      <div class="p2-title">📊 Progress Tracker</div>
       <div class="loading" style="padding:40px 0"><div class="spinner">⟳</div>
         <p style="margin-top:12px;color:#888">Loading activity for ${fmtDate(dateFrom)}${state.logRangeMode && dateTo !== dateFrom ? ' – ' + fmtDate(dateTo) : ''}…</p>
       </div></div>`;
   }
 
-  // ── header / date picker (shared between summary + detail) ───────────
+  // ── shared header / date picker ───────────────────────────────────────
   const rangeBtn = state.logRangeMode
     ? `<span style="font-size:11px;color:#888;margin-left:6px">to</span>
        <input type="date" id="log-date-end" value="${dateTo}" max="${todayET()}"
          style="padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:13px;cursor:pointer">`
     : '';
   const header = `
-    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px">
-      <div class="p2-title" style="margin-bottom:0">📋 Daily Log</div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <div class="p2-title" style="margin-bottom:0">📊 Progress Tracker</div>
       <div style="flex:1"></div>
       <input type="date" id="log-date-start" value="${dateFrom}" max="${todayET()}"
         style="padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:13px;cursor:pointer">
@@ -4641,218 +4836,1220 @@ function renderDailyLog() {
       <button id="log-reload" style="padding:5px 12px;font-size:12px;background:#1976D2;color:white;border:none;border-radius:6px;cursor:pointer">Load</button>
     </div>`;
 
-  // ── drill-down: single student ────────────────────────────────────────
-  if (state.logStudentId) {
-    const student = state.students.find(s => s.id === state.logStudentId);
-    const prog    = typeof student?.program === 'string' ? student.program : '';
-    const data    = (state.logData || {})[state.logStudentId] || { statusUpdates: [], observations: [], readingLogs: [] };
-    const su      = data.statusUpdates;
-    const obs     = data.observations;
-    const rl      = data.readingLogs || [];
-
-    const suHtml = su.length === 0
-      ? `<p style="color:#aaa;font-size:13px;text-align:center;padding:16px 0">No progress updates logged</p>`
-      : su.map(u => {
-          const sc = LOG_STATUS_COLOR[u.status] || { bg:'#F5F5F5', tc:'#555' };
-          return `
-            <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid #f0f0f0">
-              <div style="flex:1;min-width:0">
-                <div style="font-size:13px;font-weight:600;color:#212121;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${u.activityName}</div>
-                ${u.subject ? `<div style="font-size:11px;color:#888;margin-top:1px">${u.subject}</div>` : ''}
-                ${u.notes ? `<div style="font-size:12px;color:#555;margin-top:4px;font-style:italic">${u.notes}</div>` : ''}
-              </div>
-              <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0">
-                <span style="padding:3px 8px;border-radius:10px;font-size:11px;font-weight:600;background:${sc.bg};color:${sc.tc}">${u.status}</span>
-                ${u.teacherName ? `<span style="font-size:10px;color:#aaa">${u.teacherName}</span>` : ''}
-                <span style="font-size:10px;color:#bbb">${fmtDate(u.date)}</span>
-              </div>
-            </div>`;
-        }).join('');
-
-    const obsHtml = obs.length === 0
-      ? `<p style="color:#aaa;font-size:13px;text-align:center;padding:16px 0">No observations logged</p>`
-      : obs.map(o => `
-          <div style="padding:10px 0;border-bottom:1px solid #f0f0f0">
-            <div style="font-size:13px;color:#333;line-height:1.5">"${o.notes}"</div>
-            <div style="font-size:11px;color:#aaa;margin-top:4px">${o.teacherName ? o.teacherName + ' · ' : ''}${fmtDate(o.date)}</div>
-          </div>`).join('');
-
-    const rlHtml = rl.length === 0
-      ? `<p style="color:#aaa;font-size:13px;text-align:center;padding:16px 0">No reading sessions logged</p>`
-      : rl.map(e => {
-          const bg = rlActivityBg(e.activityType);
-          const tc = rlActivityColor(e.activityType);
-          const ic = rlActivityIcon(e.activityType);
-          return `
-            <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid #f0f0f0">
-              <div style="flex:1;min-width:0">
-                <div style="font-size:13px;font-weight:600;color:#212121">${e.bookTitle || '—'}</div>
-                ${e.notes ? `<div style="font-size:12px;color:#555;margin-top:3px;font-style:italic">${e.notes}</div>` : ''}
-              </div>
-              <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0">
-                <span style="padding:3px 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap;background:${bg};color:${tc}">${ic} ${displayActivityType(e.activityType)}</span>
-                ${e.teacherName ? `<span style="font-size:10px;color:#aaa">${e.teacherName}</span>` : ''}
-                <span style="font-size:10px;color:#bbb">${fmtDate(e.date)}</span>
-              </div>
-            </div>`;
-        }).join('');
-
-    return `<div class="main p2-screen">
-      ${header}
-      <button id="log-back" style="display:flex;align-items:center;gap:6px;background:none;border:none;color:#1976D2;font-size:13px;font-weight:600;cursor:pointer;padding:0;margin-bottom:16px">
-        ← Back to summary
-      </button>
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px">
-        <div style="width:36px;height:36px;border-radius:50%;background:#E3F2FD;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0">
-          ${(student?.name||'?')[0].toUpperCase()}
-        </div>
-        <div>
-          <div style="font-size:16px;font-weight:700;color:#212121">${student?.name || 'Unknown'}</div>
-          <div style="font-size:12px;color:#888">${prog || 'No program'}</div>
-        </div>
-      </div>
-
-      <div style="font-size:13px;font-weight:700;color:#212121;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">
-        Status Updates (${su.length})
-      </div>
-      <div style="background:white;border-radius:10px;padding:0 12px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.07)">
-        ${suHtml}
-      </div>
-
-      <div style="font-size:13px;font-weight:700;color:#212121;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">
-        Observations (${obs.length})
-      </div>
-      <div style="background:white;border-radius:10px;padding:0 12px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.07)">
-        ${obsHtml}
-      </div>
-
-      <div style="font-size:13px;font-weight:700;color:#212121;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">
-        Reading Sessions (${rl.length})
-      </div>
-      <div style="background:white;border-radius:10px;padding:0 12px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.07)">
-        ${rlHtml}
-      </div>
-    </div>`;
-  }
-
-  // ── no data loaded yet ────────────────────────────────────────────────
-  if (!state.logData) {
-    return `<div class="main p2-screen">
-      ${header}
-      <div style="text-align:center;padding:40px 0;color:#aaa;font-size:13px">
-        Select a date and press <strong>Load</strong> to view activity
-      </div>
-    </div>`;
-  }
-
-  // ── summary view ──────────────────────────────────────────────────────
-  const IT_BANDS = ['Toddler (18m-3y)','Nido (0-18m)'];
-  const EC_BANDS = ['Early (2.5-3.5)','Core (3.5-4.5)','Advanced (4.5-6)'];
-  const itStudents = state.students.filter(s => { const p = typeof s.program==='string'?s.program:''; return p.includes('Infant')||p.includes('Toddler'); });
-  const ecStudents = state.students.filter(s => { const p = typeof s.program==='string'?s.program:''; return p.includes('Early Childhood'); });
-
-  const allActive = Object.keys(state.logData);
-  const totalUpdates  = allActive.reduce((n,sid) => n + (state.logData[sid].statusUpdates.length||0), 0);
-  const totalObs      = allActive.reduce((n,sid) => n + (state.logData[sid].observations.length||0), 0);
-  const totalReading  = allActive.reduce((n,sid) => n + (state.logData[sid].readingLogs  ||[]).length, 0);
-  const teacherSet   = new Set();
-  allActive.forEach(sid => {
-    const d = state.logData[sid];
-    d.statusUpdates.forEach(u => { if (u.teacherName) teacherSet.add(u.teacherName); });
-    d.observations.forEach(o => { if (o.teacherName) teacherSet.add(o.teacherName); });
-    (d.readingLogs||[]).forEach(rl => { if (rl.teacherName) teacherSet.add(rl.teacherName); });
-  });
-  const totalTeachers = teacherSet.size;
-
-  const dateLabel = state.logRangeMode && dateTo !== dateFrom
-    ? `${fmtDate(dateFrom)} – ${fmtDate(dateTo)}`
-    : fmtDate(dateFrom);
-
-  const kpiHtml = `
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:10px;margin-bottom:20px">
-      ${[
-        { label:'Activities Logged', val: totalUpdates,   icon:'📝' },
-        { label:'Students Active',   val: allActive.length, icon:'👦' },
-        { label:'Observations',      val: totalObs,       icon:'🗒️' },
-        { label:'Reading Sessions',  val: totalReading,   icon:'📚' },
-        { label:'Teachers Active',   val: totalTeachers,  icon:'👩‍🏫' },
-      ].map(k => `
-        <div style="background:white;border-radius:10px;padding:12px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.07)">
-          <div style="font-size:20px">${k.icon}</div>
-          <div style="font-size:22px;font-weight:700;color:#212121;line-height:1.2">${k.val}</div>
-          <div style="font-size:10px;color:#888">${k.label}</div>
-        </div>`).join('')}
-    </div>`;
-
-  function renderProgramRows(label, students) {
-    if (!students.length) return '';
-    const activeRows = students
-      .map(s => {
-        const d   = state.logData[s.id] || { statusUpdates:[], observations:[], readingLogs:[] };
-        const su  = d.statusUpdates.length;
-        const obs = d.observations.length;
-        const rl  = (d.readingLogs||[]).length;
-        if (su === 0 && obs === 0 && rl === 0) return null; // inactive
-        return { s, su, obs, rl };
-      })
-      .filter(Boolean)
-      .sort((a,b) => (b.su + b.obs + b.rl) - (a.su + a.obs + a.rl));
-
-    const inactiveCount = students.length - activeRows.length;
-
-    if (!activeRows.length && inactiveCount) {
-      return `<div style="margin-bottom:20px">
-        <div style="font-size:12px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">${label}</div>
-        <div style="font-size:13px;color:#aaa;padding:10px 0">${inactiveCount} student${inactiveCount>1?'s':''} — no activity logged</div>
+  // ── KPI summary (always shown when data loaded) ───────────────────────
+  let kpiSummary = '';
+  if (state.logData) {
+    const allActive = Object.keys(state.logData);
+    const totalUpdates = allActive.reduce((n,sid) => n + (state.logData[sid].statusUpdates.length||0), 0);
+    const totalObs     = allActive.reduce((n,sid) => n + (state.logData[sid].observations.length||0), 0);
+    const totalReading = allActive.reduce((n,sid) => n + (state.logData[sid].readingLogs||[]).length, 0);
+    const teacherSet   = new Set();
+    allActive.forEach(sid => {
+      const d = state.logData[sid];
+      d.statusUpdates.forEach(u => { if (u.teacherName) teacherSet.add(u.teacherName); });
+      d.observations.forEach(o => { if (o.teacherName) teacherSet.add(o.teacherName); });
+      (d.readingLogs||[]).forEach(r => { if (r.teacherName) teacherSet.add(r.teacherName); });
+    });
+    const dateLabel = state.logRangeMode && dateTo !== dateFrom ? `${fmtDate(dateFrom)} – ${fmtDate(dateTo)}` : fmtDate(dateFrom);
+    kpiSummary = `
+      <div style="font-size:12px;color:#888;margin-bottom:10px">Activity for ${dateLabel}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:10px;margin-bottom:20px">
+        ${[
+          { label:'Activities Logged', val: totalUpdates,     icon:'📝' },
+          { label:'Students Active',   val: allActive.length, icon:'👦' },
+          { label:'Observations',      val: totalObs,         icon:'🗒️' },
+          { label:'Reading Sessions',  val: totalReading,     icon:'📚' },
+          { label:'Teachers Active',   val: teacherSet.size,  icon:'👩‍🏫' },
+        ].map(k => `
+          <div style="background:white;border-radius:10px;padding:12px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.07)">
+            <div style="font-size:20px">${k.icon}</div>
+            <div style="font-size:22px;font-weight:700;color:#212121;line-height:1.2">${k.val}</div>
+            <div style="font-size:10px;color:#888">${k.label}</div>
+          </div>`).join('')}
       </div>`;
-    }
-
-    const rows = activeRows.map(({ s, su, obs, rl }) => `
-      <div onclick="state.logStudentId='${s.id}';render()"
-        style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:white;border-radius:8px;margin-bottom:6px;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.06);transition:box-shadow .15s"
-        onmouseover="this.style.boxShadow='0 2px 8px rgba(0,0,0,.12)'" onmouseout="this.style.boxShadow='0 1px 3px rgba(0,0,0,.06)'">
-        <div style="width:32px;height:32px;border-radius:50%;background:#E3F2FD;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#1565C0;flex-shrink:0">
-          ${s.name[0].toUpperCase()}
-        </div>
-        <div style="flex:1;min-width:0">
-          <div style="font-size:13px;font-weight:600;color:#212121">${s.name}</div>
-          <div style="font-size:11px;color:#888">
-            ${su > 0 ? su + ' status update' + (su>1?'s':'') : ''}${su>0&&(obs>0||rl>0)?' · ':''}${obs > 0 ? obs + ' observation' + (obs>1?'s':'') : ''}${(obs>0&&rl>0)?' · ':''}${rl > 0 ? rl + ' reading session' + (rl>1?'s':'') : ''}
-          </div>
-        </div>
-        <div style="display:flex;gap:6px;align-items:center;flex-shrink:0">
-          ${su > 0  ? `<span style="background:#E3F2FD;color:#1565C0;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:600">${su}</span>` : ''}
-          ${obs > 0 ? `<span style="background:#E8F5E9;color:#2E7D32;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:600">👁 ${obs}</span>` : ''}
-          ${rl > 0  ? `<span style="background:#FFF3E0;color:#E65100;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:600">📚 ${rl}</span>` : ''}
-          <span style="color:#ccc;font-size:14px">›</span>
-        </div>
-      </div>`).join('');
-
-    return `<div style="margin-bottom:20px">
-      <div style="font-size:12px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">${label} · ${activeRows.length} active</div>
-      ${rows}
-      ${inactiveCount ? `<div style="font-size:12px;color:#bbb;padding:4px 0">${inactiveCount} student${inactiveCount>1?'s':''} had no activity logged</div>` : ''}
-    </div>`;
   }
 
-  const noActivityTotal = state.students.filter(s => !(state.logData[s.id]) ||
-    (!state.logData[s.id].statusUpdates.length && !state.logData[s.id].observations.length && !(state.logData[s.id].readingLogs||[]).length)).length;
+  const childFilterStudent = null; // kept only because setupHandlers still references logChildFilter events
 
+  // ── render flat: KPI cards → progress grid ───────────────────────────
   return `<div class="main p2-screen">
     ${header}
-    <div style="font-size:12px;color:#888;margin-bottom:16px">Activity for ${dateLabel}</div>
-    ${totalUpdates === 0 && totalObs === 0 && totalReading === 0
-      ? `<div style="background:#FFF8E1;border:1px solid #FFE082;border-radius:10px;padding:16px;text-align:center;margin-bottom:20px">
-           <div style="font-size:14px;color:#795548">No activity was logged for this date range.</div>
-         </div>`
-      : kpiHtml
+    ${kpiSummary}
+    ${renderProgressGrid(dateFrom, dateTo)}
+  </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PROGRESS GRID
+// ═══════════════════════════════════════════════════════════════════════
+function renderProgressGrid(dateFrom, dateTo) {
+  if (!state.logData) {
+    return `<div style="text-align:center;padding:24px 0;color:#aaa;font-size:13px">
+      Load a date range using the controls above, then view the Progress Grid here.
+    </div>`;
+  }
+
+  // Build list of dates in range
+  const pgDates = [];
+  const pgStart = new Date(dateFrom + 'T12:00:00');
+  const pgEnd   = new Date(dateTo   + 'T12:00:00');
+  const pgCur   = new Date(pgStart);
+  while (pgCur <= pgEnd) {
+    pgDates.push(pgCur.toISOString().split('T')[0]);
+    pgCur.setDate(pgCur.getDate() + 1);
+  }
+  if (pgDates.length === 0) pgDates.push(dateFrom);
+
+  const pgDayNames   = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const pgMonthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  const fmtCol = (iso) => {
+    const dt = new Date(iso + 'T12:00:00');
+    return `${pgDayNames[dt.getDay()]}<br><span style="font-size:10px;font-weight:400">${pgMonthNames[dt.getMonth()]} ${dt.getDate()}</span>`;
+  };
+
+  // Filter out test students
+  const isTestStudent = (s) => /\btest\b/i.test(s.name);
+  const allPgStudents = [...state.students]
+    .filter(s => !isTestStudent(s))
+    .sort((a,b) => a.name.localeCompare(b.name));
+
+  // Child filter dropdown
+  const pgFilterStudent = state.gridChildFilter
+    ? allPgStudents.find(s => s.id === state.gridChildFilter) : null;
+  const pgQ = (state.gridChildSearch || '').toLowerCase();
+  const pgFilterOptions = allPgStudents
+    .filter(s => !pgQ || s.name.toLowerCase().includes(pgQ))
+    .slice(0, 20);
+
+  const pgDropdownList = state.gridChildDropdownOpen ? `
+    <div style="position:absolute;top:calc(100% + 4px);left:0;right:0;background:white;border:1px solid #ddd;border-radius:8px;z-index:50;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,.12)">
+      <input id="grid-child-search" type="text" placeholder="Search by name…" value="${state.gridChildSearch || ''}"
+        style="width:100%;padding:8px 10px;border:none;border-bottom:1px solid #eee;font-size:13px;outline:none;box-sizing:border-box">
+      <div style="max-height:200px;overflow-y:auto">
+        ${pgFilterOptions.length === 0
+          ? `<div style="padding:10px 12px;font-size:13px;color:#aaa">No children found</div>`
+          : pgFilterOptions.map(s => {
+              const init = s.name.split(' ').map(p=>p[0]).join('').slice(0,2).toUpperCase();
+              const isAct = s.id === state.gridChildFilter;
+              return `<div data-gridchild="${s.id}"
+                style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;font-size:13px;
+                       color:${isAct?'#1565C0':'#212121'};font-weight:${isAct?'600':'400'};
+                       background:${isAct?'#E3F2FD':'white'}"
+                onmouseover="this.style.background='${isAct?'#BBDEFB':'#f5f5f5'}'"
+                onmouseout="this.style.background='${isAct?'#E3F2FD':'white'}'">
+                <div style="width:24px;height:24px;border-radius:50%;background:#E3F2FD;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:#1565C0;flex-shrink:0">${init}</div>
+                ${s.name}
+              </div>`;
+            }).join('')}
+      </div>
+    </div>` : '';
+
+  const pgFilterRow = `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+      <span style="font-size:12px;color:#888;white-space:nowrap">Filter by child:</span>
+      <div id="grid-child-dropdown-wrap" style="position:relative;flex:1;min-width:180px;max-width:300px">
+        <div id="grid-child-filter-input" style="display:flex;align-items:center;gap:6px;padding:6px 10px;
+          border:1px solid ${pgFilterStudent?'#1976D2':'#ddd'};border-radius:8px;
+          background:white;cursor:pointer;font-size:13px;color:${pgFilterStudent?'#1565C0':'#888'};user-select:none">
+          ${pgFilterStudent
+            ? `<div style="width:20px;height:20px;border-radius:50%;background:#E3F2FD;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:600;color:#1565C0;flex-shrink:0">
+                ${pgFilterStudent.name.split(' ').map(p=>p[0]).join('').slice(0,2).toUpperCase()}</div>`
+            : ''}
+          <span style="flex:1">${pgFilterStudent ? pgFilterStudent.name : 'All children'}</span>
+          <span style="color:#bbb;font-size:11px">▾</span>
+        </div>
+        ${pgDropdownList}
+      </div>
+      ${pgFilterStudent
+        ? `<button id="grid-child-clear" style="padding:5px 10px;font-size:12px;border:1px solid #ddd;border-radius:6px;background:white;color:#888;cursor:pointer">✕ Show all</button>`
+        : ''}
+    </div>`;
+
+  // Apply child filter
+  const pgStudents = pgFilterStudent ? [pgFilterStudent] : allPgStudents;
+
+  if (!pgStudents.length) return `
+    ${pgFilterRow}
+    <div style="text-align:center;padding:24px 0;color:#aaa;font-size:13px">No students found.</div>`;
+
+  const pgThBase   = `padding:8px 10px;background:#F5F5F5;border:1px solid #e0e0e0;font-size:11px;font-weight:700;text-align:center;white-space:nowrap;min-width:110px`;
+  const pgTdSticky = `padding:8px 10px;border:1px solid #e0e0e0;font-size:12px;font-weight:600;background:#FAFAFA;white-space:nowrap;position:sticky;left:0;z-index:2`;
+
+  const colHeaders = pgDates.map(d => `<th style="${pgThBase}">${fmtCol(d)}</th>`).join('');
+
+  // Status pill styles (collapsed view)
+  const PG_PILL = {
+    'Presented':    { bg:'#E3F2FD', tc:'#0C447C' },
+    'In Progress':  { bg:'#FFF3E0', tc:'#E65100' },
+    'Working Well': { bg:'#E8F5E9', tc:'#2E7D32' },
+    'Mastered':     { bg:'#EDE7F6', tc:'#4527A0' },
+    'Not Started':  { bg:'#F5F5F5', tc:'#757575' },
+  };
+
+  const pgRows = pgStudents.map(s => {
+    const pgData = state.logData[s.id] || { statusUpdates:[], observations:[], readingLogs:[] };
+    const pgInit = s.name.split(' ').map(p=>p[0]).join('').slice(0,2).toUpperCase();
+    const hasAnyActivity = pgDates.some(d => {
+      const su = pgData.statusUpdates.filter(u => u.date === d);
+      const rl = (pgData.readingLogs||[]).filter(r => r.date === d);
+      return su.length + rl.length > 0;
+    });
+
+    // ── Compact pill cells ────────────────────────────────────────────────
+    const pgCells = pgDates.map(d => {
+      const su = pgData.statusUpdates.filter(u => u.date === d);
+      const rl = (pgData.readingLogs||[]).filter(r => r.date === d);
+
+      if (su.length + rl.length === 0) {
+        return `<td style="padding:6px 8px;border:1px solid #e0e0e0;text-align:center;min-width:110px;vertical-align:middle">
+          <span style="color:#ddd;font-size:11px">—</span>
+        </td>`;
+      }
+
+      // Group status updates by status type
+      const groups = {};
+      su.forEach(u => { groups[u.status] = (groups[u.status]||0) + 1; });
+
+      const pills = Object.entries(groups).map(([status, count]) => {
+        const sc = PG_PILL[status] || { bg:'#F5F5F5', tc:'#555' };
+        return `<div style="display:inline-flex;align-items:center;gap:3px;background:${sc.bg};color:${sc.tc};border-radius:20px;padding:2px 7px;font-size:10px;margin:2px 1px;white-space:nowrap">
+          <span style="font-weight:700">${count}</span>&nbsp;${status.toLowerCase()}
+        </div>`;
+      });
+
+      const bookBadges = rl.map(r =>
+        `<div style="display:inline-block;background:#FFF8E1;color:#F57F17;border-radius:4px;padding:2px 6px;font-size:10px;margin:2px 1px;white-space:nowrap">📚 ${(r.bookTitle||'Reading').slice(0,16)}</div>`
+      );
+
+      return `<td style="padding:6px 8px;border:1px solid #e0e0e0;vertical-align:middle;min-width:110px">
+        <div style="display:flex;flex-wrap:wrap;gap:1px">${pills.join('')}${bookBadges.join('')}</div>
+      </td>`;
+    }).join('');
+
+    // ── Expanded detail row (hidden by default) ───────────────────────────
+    const allEntries = pgDates.flatMap(d => {
+      const su = pgData.statusUpdates.filter(u => u.date === d);
+      const rl = (pgData.readingLogs||[]).filter(r => r.date === d);
+      return [
+        ...su.map(u => ({ d, type:'status', status: u.status, name: u.activityName||'', subject: u.subject||'', teacher: u.teacherName||'' })),
+        ...rl.map(r => ({ d, type:'reading', name: r.bookTitle||'Reading', teacher: r.teacherName||'' })),
+      ];
+    });
+
+    const expandRows = allEntries.map(e => {
+      const dt = new Date(e.d + 'T12:00:00');
+      const dayLabel = `${pgDayNames[dt.getDay()]} ${pgMonthNames[dt.getMonth()]} ${dt.getDate()}`;
+      if (e.type === 'reading') {
+        return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:0.5px solid #f0f0f0">
+          <span style="font-size:11px;color:#999;min-width:72px">${dayLabel}</span>
+          <span style="background:#FFF8E1;color:#F57F17;border-radius:4px;padding:2px 7px;font-size:10px">📚 Reading</span>
+          <span style="font-size:12px;color:#333">${e.name}</span>
+          ${e.teacher ? `<span style="font-size:10px;color:#bbb;margin-left:auto">${e.teacher}</span>` : ''}
+        </div>`;
+      }
+      const sc = PG_PILL[e.status] || { bg:'#F5F5F5', tc:'#555' };
+      return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:0.5px solid #f0f0f0">
+        <span style="font-size:11px;color:#999;min-width:72px">${dayLabel}</span>
+        <span style="background:${sc.bg};color:${sc.tc};border-radius:20px;padding:2px 8px;font-size:10px;white-space:nowrap">${e.status}</span>
+        <span style="font-size:12px;color:#333;flex:1">${e.name}${e.subject ? `<span style="color:#aaa;font-size:10px"> · ${e.subject}</span>` : ''}</span>
+        ${e.teacher ? `<span style="font-size:10px;color:#bbb">${e.teacher}</span>` : ''}
+      </div>`;
+    }).join('');
+
+    const expandRow = hasAnyActivity ? `
+    <tr id="pg-exp-${s.id}" style="display:none">
+      <td colspan="${1 + pgDates.length}" style="padding:0;border:1px solid #e0e0e0;border-top:none;background:#FAFBFC">
+        <div style="padding:10px 16px 6px">
+          ${expandRows}
+          <div style="text-align:right;padding-top:6px">
+            <span onclick="document.getElementById('pg-exp-${s.id}').style.display='none'"
+              style="font-size:10px;color:#1976D2;cursor:pointer">Collapse ▲</span>
+          </div>
+        </div>
+      </td>
+    </tr>` : '';
+
+    const rowClick = hasAnyActivity
+      ? `onclick="const r=document.getElementById('pg-exp-${s.id}');r.style.display=r.style.display==='none'?'table-row':'none'" style="cursor:pointer"`
+      : '';
+
+    return `<tr ${rowClick}>
+      <td style="${pgTdSticky}">
+        <div style="display:flex;align-items:center;gap:7px">
+          <div style="width:26px;height:26px;border-radius:50%;background:#E3F2FD;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#1565C0;flex-shrink:0">${pgInit}</div>
+          <div style="font-size:12px;font-weight:600;color:#212121">${s.name}</div>
+          ${hasAnyActivity ? `<span style="color:#bbb;font-size:10px;margin-left:auto">▸</span>` : ''}
+        </div>
+      </td>
+      ${pgCells}
+    </tr>${expandRow}`;
+  }).join('');
+
+  const pgDateLabel = dateFrom === dateTo ? fmtDate(dateFrom) : `${fmtDate(dateFrom)} – ${fmtDate(dateTo)}`;
+  const pgMinW = 140 + pgDates.length * 110;
+
+  return `
+    ${pgFilterRow}
+    <div style="font-size:12px;color:#888;margin-bottom:10px">Progress Grid · ${pgDateLabel}${pgFilterStudent ? ' · ' + pgFilterStudent.name : ''}</div>
+    <div style="overflow-x:auto;border-radius:8px;border:1px solid #e0e0e0">
+      <table style="border-collapse:collapse;width:100%;min-width:${pgMinW}px">
+        <thead>
+          <tr>
+            <th style="${pgThBase};text-align:left;position:sticky;left:0;z-index:3;background:#F5F5F5;min-width:140px">Student</th>
+            ${colHeaders}
+          </tr>
+        </thead>
+        <tbody>${pgRows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderDeviationModal() {
+  if (!state.lpDivModal) return '';
+  const loggedActName = (state.activities.find(a => a.id === state.lpDivActId)||{}).name || state.lpDivActId || '';
+  const reasons = [
+    'Child not ready for this activity',
+    'Material not available',
+    'Child chose a different activity',
+    'Repeated at child\'s request',
+    'Other'
+  ];
+  const divBtnStyle = state.lpDivReason
+    ? 'padding:8px 18px;background:#1976D2;color:white;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer'
+    : 'padding:8px 18px;background:#ccc;color:white;border:none;border-radius:8px;font-size:13px;cursor:not-allowed';
+  return `<div style="position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:300;display:flex;align-items:center;justify-content:center;padding:16px">
+    <div style="background:white;border-radius:12px;width:100%;max-width:460px;padding:24px;position:relative;box-shadow:0 8px 40px rgba(0,0,0,.25)">
+      <div style="font-size:15px;font-weight:700;color:#212121;margin-bottom:6px">Activity differs from lesson plan</div>
+      <div style="background:#FFF8E1;border:1px solid #FFE082;border-radius:8px;padding:10px 14px;font-size:12px;margin-bottom:16px">
+        <div style="color:#888;margin-bottom:2px">Planned today:</div>
+        <div style="font-weight:600;color:#333">${state.lpDivPlannedActName}</div>
+        <div style="color:#888;margin-top:6px;margin-bottom:2px">You logged:</div>
+        <div style="font-weight:600;color:#333">${loggedActName}</div>
+      </div>
+      <div style="font-size:12px;font-weight:600;color:#555;margin-bottom:10px">Reason for change</div>
+      ${reasons.map(r => `<label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:13px;cursor:pointer;color:#212121">
+        <input type="radio" name="div-reason" value="${r}" ${state.lpDivReason===r?'checked':''}
+          onclick="state.lpDivReason='${r}';render()"> ${r}
+      </label>`).join('')}
+      ${state.lpDivReason === 'Other' ? `<input type="text" id="div-reason-other" value="${state.lpDivReasonOther||''}"
+        placeholder="Describe the reason…"
+        style="width:100%;margin-top:8px;padding:8px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;box-sizing:border-box">` : ''}
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+        <button onclick="state.lpDivModal=false;render()"
+          style="padding:8px 16px;background:white;border:1px solid #ddd;border-radius:8px;font-size:13px;cursor:pointer;color:#555">
+          Skip
+        </button>
+        <button onclick="saveDeviation()" ${state.lpDivReason?'':'disabled'} style="${divBtnStyle}">
+          Save reason
+        </button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// LESSON PLAN MODAL + AI GENERATION
+// ═══════════════════════════════════════════════════════════════════════
+function renderLessonPlanModal() {
+  const lpStudent = state.students.find(s => s.id === state.lpStudentId);
+  if (!lpStudent) return '';
+
+  const lpToday = todayET();
+  const lpOverlay = `position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:200;display:flex;align-items:flex-start;justify-content:center;padding:16px;overflow-y:auto`;
+  const lpModal2  = `background:white;border-radius:12px;width:100%;max-width:960px;box-shadow:0 8px 40px rgba(0,0,0,.25);position:relative;margin:auto`;
+  const lpClose   = `<button onclick="state.lpModal=false;render()"
+    style="position:absolute;top:12px;right:14px;background:none;border:none;font-size:22px;cursor:pointer;color:#888;line-height:1;z-index:1">✕</button>`;
+
+  // Loading spinner
+  if (state.lpLoading) {
+    return `<div style="${lpOverlay}"><div style="${lpModal2};padding:48px;text-align:center">
+      ${lpClose}
+      <div style="font-size:28px;margin-bottom:14px">🤖</div>
+      <div style="font-size:16px;font-weight:600;color:#212121;margin-bottom:8px">Generating plan for ${lpStudent.name}…</div>
+      <div class="spinner" style="margin:0 auto">⟳</div>
+      <div style="font-size:12px;color:#888;margin-top:14px">This may take 20–30 seconds</div>
+    </div></div>`;
+  }
+
+  // Plan not yet ready — show preparing/error state
+  if (!state.lpData) {
+    return `<div style="${lpOverlay}"><div style="${lpModal2};padding:48px;text-align:center">
+      ${lpClose}
+      <div style="font-size:28px;margin-bottom:14px">🤖</div>
+      <div style="font-size:16px;font-weight:600;color:#212121;margin-bottom:8px">Preparing lesson plan for ${lpStudent.name}…</div>
+      ${state.lpError
+        ? `<div style="background:#FFEBEE;border:1px solid #FFCDD2;border-radius:8px;padding:12px 16px;font-size:13px;color:#C62828;margin:16px auto;text-align:left;max-width:480px">${state.lpError}
+            <div style="margin-top:10px">
+              <button onclick="generateLessonPlan('${lpStudent.id}')"
+                style="padding:8px 18px;background:#7B1FA2;color:white;border:none;border-radius:8px;font-size:12px;cursor:pointer">↺ Try Again</button>
+            </div>
+          </div>`
+        : `<div class="spinner" style="margin:0 auto">⟳</div>
+           <div style="font-size:12px;color:#888;margin-top:14px">Analysing progress and generating personalised plan…</div>`}
+    </div></div>`;
+  }
+
+  // Plan grid view
+  const lpPlan  = state.lpData;
+  const lpAreas = ['Practical Life','Sensorial','Language','Math','Cultural / Science','Reading'];
+  const lpAreaColors = {
+    'Practical Life':     { bg:'#E3F2FD', tc:'#1565C0' },
+    'Sensorial':          { bg:'#F3E5F5', tc:'#6A1B9A' },
+    'Language':           { bg:'#E8F5E9', tc:'#2E7D32' },
+    'Math':               { bg:'#FFF8E1', tc:'#F57F17' },
+    'Cultural / Science': { bg:'#FCE4EC', tc:'#AD1457' },
+    'Reading':            { bg:'#FFF3E0', tc:'#E65100' },
+  };
+
+  const lpAllDays   = (lpPlan.weeks || []).flatMap(w => w.days || []);
+  const lpMonths    = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const lpTodayIso  = todayET();
+
+  const lpWeekSpans = (lpPlan.weeks || []).map(w =>
+    `<th colspan="${(w.days||[]).length}" style="padding:5px 8px;background:#ECEFF1;border:1px solid #e0e0e0;font-size:10px;font-weight:700;text-align:center;color:#546E7A">Week ${w.weekNum}</th>`
+  ).join('');
+
+  const lpDayHeaders = lpAllDays.map(day => {
+    const dt = new Date(day.date + 'T12:00:00');
+    return `<th style="padding:7px 8px;background:#F5F5F5;border:1px solid #e0e0e0;font-size:11px;font-weight:700;text-align:center;min-width:100px">
+      ${day.dayName}<br><span style="font-size:10px;font-weight:400">${lpMonths[dt.getMonth()]} ${dt.getDate()}</span>
+    </th>`;
+  }).join('');
+
+  function lpTrackStatus(area, dayDate) {
+    if (!state.logData) return null;
+    if (dayDate > lpTodayIso) return 'planned';
+    const sid    = state.lpStudentId;
+    const sData  = state.logData[sid] || {};
+    if (area === 'Reading') {
+      return (sData.readingLogs||[]).some(r => r.date === dayDate) ? 'completed' : 'missed';
     }
-    ${renderProgramRows('Infant &amp; Toddler', itStudents)}
-    ${renderProgramRows('Early Childhood', ecStudents)}
-    ${noActivityTotal > 0 && (totalUpdates > 0 || totalObs > 0)
-      ? `<div style="font-size:12px;color:#bbb;text-align:center;padding-top:4px">
-           ${noActivityTotal} student${noActivityTotal>1?'s':''} had no activity logged this period
-         </div>` : ''}
+    return (sData.statusUpdates||[]).some(u => u.date === dayDate) ? 'completed' : 'missed';
+  }
+
+  const lpStatusIcon = { completed:'✅', planned:'🔲', missed:'❌' };
+  const lpCellBg     = { completed:'#F1F8E9', planned:'white', missed:'#FFF5F5' };
+
+  const lpAreaRows = lpAreas.map(area => {
+    const { bg, tc } = lpAreaColors[area] || { bg:'#F5F5F5', tc:'#555' };
+    const lpCells = lpAllDays.map(day => {
+      const activity = ((day.activities || {})[area]) || '—';
+      const ts = lpTrackStatus(area, day.date);
+      return `<td style="padding:8px 10px;border:1px solid #e0e0e0;vertical-align:top;font-size:11px;background:${lpCellBg[ts]||'white'}">
+        <div style="color:#333;line-height:1.4">${activity}</div>
+        ${ts ? `<div style="margin-top:3px;font-size:10px">${lpStatusIcon[ts]}</div>` : ''}
+      </td>`;
+    }).join('');
+    return `<tr>
+      <td style="padding:8px 10px;border:1px solid #e0e0e0;background:#FAFAFA;position:sticky;left:0;z-index:2;white-space:nowrap">
+        <span style="padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600;background:${bg};color:${tc}">${area}</span>
+      </td>
+      ${lpCells}
+    </tr>`;
+  }).join('');
+
+  const lpSavedBadge = state.lpSavedPlanId
+    ? `<span style="font-size:11px;color:#2E7D32;font-weight:600">✅ Saved</span>` : '';
+
+  const lpMinW = 130 + lpAllDays.length * 100;
+
+  return `<div style="${lpOverlay}"><div style="${lpModal2}">
+    ${lpClose}
+    <div style="padding:18px 22px 12px">
+      <div style="font-size:15px;font-weight:700;color:#212121">📋 Lesson Plan · ${lpStudent.name}</div>
+      <div style="font-size:12px;color:#888;margin-top:2px">${lpPlan.planStart ? fmtDate(lpPlan.planStart) + ' – ' + fmtDate(lpPlan.planEnd) : ''}</div>
+    </div>
+
+    <div style="padding:0 22px;overflow-x:auto">
+      <table style="border-collapse:collapse;width:100%;min-width:${lpMinW}px">
+        <thead>
+          <tr>
+            <th style="padding:5px 8px;background:#ECEFF1;border:1px solid #e0e0e0;font-size:10px;position:sticky;left:0;z-index:3"></th>
+            ${lpWeekSpans}
+          </tr>
+          <tr>
+            <th style="padding:7px 10px;background:#F5F5F5;border:1px solid #e0e0e0;font-size:11px;font-weight:700;text-align:left;position:sticky;left:0;z-index:3;white-space:nowrap">Area</th>
+            ${lpDayHeaders}
+          </tr>
+        </thead>
+        <tbody>${lpAreaRows}</tbody>
+      </table>
+    </div>
+
+    <div style="padding:8px 22px;display:flex;gap:16px;font-size:11px;color:#666;flex-wrap:wrap;border-top:1px solid #f0f0f0;margin-top:4px">
+      <span>✅ Completed</span><span>🔲 Upcoming</span><span>❌ Missed</span>
+      <span style="color:#bbb;font-style:italic">*Based on any activity logged that day for this student</span>
+    </div>
+
+    <div style="padding:12px 22px;background:#F8F9FA;border-top:1px solid #eee;border-bottom:1px solid #eee">
+      <div style="font-size:12px;font-weight:600;color:#444;margin-bottom:6px">Revise this plan</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="lp-revision-input" value="${state.lpRevisionPrompt || ''}"
+          placeholder='e.g. "Add more math in week 2" or "Focus on language activities"'
+          style="flex:1;min-width:200px;padding:8px 12px;border:1px solid #ddd;border-radius:8px;font-size:12px;outline:none">
+        <button onclick="reviseLessonPlan('${lpStudent.id}')"
+          style="padding:8px 18px;background:#5C6BC0;color:white;border:none;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap"
+          ${state.lpRevising ? 'disabled' : ''}>
+          ${state.lpRevising ? '⟳ Revising…' : '↺ Revise & Regenerate'}
+        </button>
+      </div>
+    </div>
+
+    <div style="padding:14px 22px;display:flex;justify-content:flex-end;align-items:center;gap:12px">
+      ${lpSavedBadge}
+      ${state.lpError ? `<span style="font-size:12px;color:#C62828">${state.lpError}</span>` : ''}
+      <button onclick="state.lpModal=false;render()"
+        style="padding:8px 18px;background:white;border:1px solid #ddd;color:#555;border-radius:8px;font-size:13px;cursor:pointer">
+        Close
+      </button>
+      <button onclick="saveLessonPlan('${lpStudent.id}')"
+        style="padding:8px 22px;background:${state.lpSaving?'#aaa':'#1976D2'};color:white;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer"
+        ${state.lpSaving ? 'disabled' : ''}>
+        ${state.lpSaving ? '⟳ Saving…' : '💾 Save Plan'}
+      </button>
+    </div>
+  </div></div>`;
+}
+
+// Load the most recent saved plan for a student from Airtable (for the current/upcoming 2-week window)
+// Load all saved plans for the upcoming week in ONE Airtable call, populate state.lpTabPlans
+async function bulkLoadPlansFromAirtable() {
+  if (state.lpTabPlansLoaded) return; // already done this session
+  state.lpTabBgLoading = true; render();
+  try {
+    // Calculate the upcoming Monday's date string for filtering
+    const now = new Date(); const dow = now.getDay();
+    const daysToMon = dow === 1 ? 0 : dow === 0 ? 1 : 8 - dow;
+    const startDt = new Date(now); startDt.setDate(now.getDate() + daysToMon);
+    const startStr = startDt.toISOString().split('T')[0];
+
+    // Fetch ALL lesson plan records (no server-side formula filter — Airtable field-ID
+    // formulas can be unreliable for date fields), then filter by date client-side.
+    const allRecs = await fetchAll(TABLES.lessonPlans, [], null, true);
+    const recs = allRecs.filter(rec => (rec.fields[FIELD.lpStart] || '') === startStr);
+
+    recs.forEach(rec => {
+      // Linked record fields may return string IDs or {id, name} objects depending on
+      // the Airtable API version / response shape — handle both safely.
+      const studentIds = (rec.fields[FIELD.lpStudent] || []).map(l => typeof l === 'object' ? l.id : l);
+      const jsonStr = rec.fields[FIELD.lpJson] || '';
+      if (!jsonStr) return;
+      try {
+        const plan = JSON.parse(jsonStr);
+        if (!plan.deviations) plan.deviations = [];
+        studentIds.forEach(sid => {
+          if (!state.lpTabPlans[sid]) {
+            state.lpTabPlans[sid] = plan;
+            // If this is the currently selected student, surface the plan immediately
+            if (sid === state.lpTabStudentId && !state.lpTabPlanData) {
+              state.lpTabPlanData = plan;
+              state.lpTabSavedPlanId = rec.id;
+            }
+          }
+        });
+      } catch(e) { console.warn('Plan JSON parse error:', e); }
+    });
+  } catch(e) { console.error('bulkLoadPlansFromAirtable error:', e); }
+  state.lpTabBgLoading = false;
+  state.lpTabPlansLoaded = true;
+  render();
+}
+
+async function loadPlanFromAirtable(studentId) {
+  try {
+    // If bulk load already ran, just return from cache
+    if (state.lpTabPlansLoaded) {
+      const cached = state.lpTabPlans[studentId];
+      return cached ? { plan: cached, recordId: state.lpTabSavedPlanId || null } : null;
+    }
+    // Calculate the same start date that generateLessonPlan would use
+    const now = new Date(); const dow = now.getDay();
+    const daysToMon = dow === 1 ? 0 : dow === 0 ? 1 : 8 - dow;
+    const startDt = new Date(now); startDt.setDate(now.getDate() + daysToMon);
+    const startStr = startDt.toISOString().split('T')[0];
+
+    const allRecs2 = await fetchAll(TABLES.lessonPlans, [], null, true);
+    const recs = allRecs2.filter(r => (r.fields[FIELD.lpStart] || '') === startStr);
+    const matching = recs.filter(r =>
+      (r.fields[FIELD.lpStudent] || []).map(l => typeof l === 'object' ? l.id : l).includes(studentId)
+    );
+    if (matching.length === 0) return null;
+
+    // Most recently created wins
+    matching.sort((a, b) => (b.fields[FIELD.lpCreatedDate] || '').localeCompare(a.fields[FIELD.lpCreatedDate] || ''));
+    const rec = matching[0];
+    const jsonStr = rec.fields[FIELD.lpJson] || '';
+    if (!jsonStr) return null;
+    const plan = JSON.parse(jsonStr);
+    if (!plan.deviations) plan.deviations = [];
+    return { plan, recordId: rec.id };
+  } catch(e) { return null; }
+}
+
+async function generateLessonPlan(studentId, background = false, forceRegenerate = false) {
+  const lpApiKey = localStorage.getItem('nm_claude_key') || '';
+  if (state.lpTabPlans[studentId] && !forceRegenerate) return; // already cached — skip
+
+  if (!background) { state.lpTabLoading = true; state.lpTabError = ''; render(); }
+  else { render(); } // re-render to refresh cached count badge
+
+  try {
+    // ── Try Airtable first (no Claude call if plan already saved) ────────
+    if (!forceRegenerate) {
+      const lpSaved = await loadPlanFromAirtable(studentId);
+      if (lpSaved) {
+        state.lpTabPlans[studentId] = lpSaved.plan;
+        if (!background) {
+          state.lpTabPlanData    = lpSaved.plan;
+          state.lpTabSavedPlanId = lpSaved.recordId;
+        }
+        if (!background) generateAllPlansBackground(studentId);
+        if (!background) { state.lpTabLoading = false; }
+        render(); return;
+      }
+    }
+
+    // ── No saved plan — call Claude to generate one ──────────────────────
+    if (!lpApiKey) { if (!background) { state.lpTabError = 'No Claude API key configured in Settings.'; } if (!background) { state.lpTabLoading = false; } render(); return; }
+
+    const lpStu = state.students.find(s => s.id === studentId) || {};
+
+    // Auto-calculate start: next Monday (or today if Monday)
+    const lpNow = new Date();
+    const lpDow = lpNow.getDay();
+    const lpDaysToMon = lpDow === 1 ? 0 : lpDow === 0 ? 1 : 8 - lpDow;
+    const lpStartDt = new Date(lpNow);
+    lpStartDt.setDate(lpNow.getDate() + lpDaysToMon);
+    const lpStartDate = lpStartDt.toISOString().split('T')[0];
+
+    // Build 10 school days Mon–Fri
+    const lpSchoolDays = [];
+    const lpCur2 = new Date(lpStartDate + 'T12:00:00');
+    const lpDayAbbr = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    while (lpSchoolDays.length < 10) {
+      const dow = lpCur2.getDay();
+      if (dow !== 0 && dow !== 6) {
+        lpSchoolDays.push({ date: lpCur2.toISOString().split('T')[0], dayName: lpDayAbbr[dow] });
+      }
+      lpCur2.setDate(lpCur2.getDate() + 1);
+    }
+    const lpPlanEnd = lpSchoolDays[9].date;
+
+    // Load full SAS data
+    await loadAllSasData();
+    const lpSas = (state.globalSas || {})[studentId] || {};
+
+    // Age-appropriate activities for this program — exclude Mastered
+    const lpAllActs = getActivitiesForProgram(lpStu);
+    const lpEligible = lpAllActs.filter(a => lpSas[a.id] !== 'Mastered');
+
+    // Priority tier: Not Started=0 > Presented=1 > In Progress=2 > Working Well=3
+    const LP_TIER = { '': 0, 'Presented': 1, 'In Progress': 2, 'Working Well': 3 };
+
+    // Subject engagement % for sorting lagging areas first (all statuses, not just mastered)
+    const lpStats = computeStudentStats(lpStu);
+    const lpSubjectLag = {};
+    Object.entries(lpStats.bySubject).forEach(([sub, d]) => {
+      // Use full engagement (any status > not started) so new students still get ordering signal
+      lpSubjectLag[sub] = d.total > 0
+        ? (d.mastered + d.workingWell + d.inProgress + d.presented) / d.total
+        : 0;
+    });
+
+    // Sort eligible: lower tier first, then lower subject mastery %, then sequence
+    lpEligible.sort((a, b) => {
+      const ta = LP_TIER[lpSas[a.id] || ''] ?? 0;
+      const tb = LP_TIER[lpSas[b.id] || ''] ?? 0;
+      if (ta !== tb) return ta - tb;
+      const la = lpSubjectLag[a.subject || 'Other'] ?? 0;
+      const lb = lpSubjectLag[b.subject || 'Other'] ?? 0;
+      if (Math.abs(la - lb) > 0.05) return la - lb;
+      return (a.seq || 0) - (b.seq || 0);
+    });
+
+    // Build per-subject pools (top 12 per subject for 10 days)
+    const LP_SUBJECTS = ['Practical Life', 'Sensorial', 'Language', 'Math', 'Cultural/Science'];
+    const lpSubjectPool = {};
+    LP_SUBJECTS.forEach(sub => {
+      lpSubjectPool[sub] = lpEligible.filter(a => {
+        const s = (a.subject || '').toLowerCase();
+        if (sub === 'Cultural/Science') return s.includes('cultur') || s.includes('science') || s.includes('geograph');
+        if (sub === 'Practical Life')   return s.includes('practical');
+        return s.includes(sub.toLowerCase());
+      }).slice(0, 12).map(a => ({ actId: a.id, name: a.name, status: lpSas[a.id] || 'Not Started' }));
+    });
+
+    // Check for skipped activities from previous plans (carryover)
+    const lpCarryoverLine = state.lpTabRevisionPrompt
+      ? `\nTeacher revision note: ${state.lpTabRevisionPrompt}` : '';
+
+    const lpPrompt = `You are a Montessori curriculum scheduler for a ${lpStu.program || 'Infant & Toddler'} program.
+
+Student: ${lpStu.name} · Age: ${lpStu.ageDisplay || 'under 3'}
+${lpCarryoverLine}
+
+CRITICAL RULE: You MUST ONLY use activities from the lists below. Do NOT invent, rename, or modify any activity. Each activity entry has an actId — include it exactly as given.
+
+AVAILABLE ACTIVITY POOLS (pick from ONLY these, prioritise lower-status items):
+${LP_SUBJECTS.map(s => `\n${s}:\n${(lpSubjectPool[s]||[]).map((a,i) => `  ${i+1}. [${a.actId}] ${a.name} (current status: ${a.status})`).join('\n') || '  (no activities available for this area)'}`).join('')}
+
+SCHEDULING RULES (Montessori work period approach):
+1. Assign exactly 2 curriculum areas per day (NOT all 5 every day). This gives the child 2 focused work periods plus Reading.
+2. Let each new activity REPEAT for 2-3 consecutive days before introducing the next one — repetition builds mastery.
+3. Rotate areas across the 2 weeks so each curriculum area appears roughly 4 times total.
+4. Use lower-status activities first (Not Started → Presented → In Progress). Build progressively — Week 2 can introduce more challenging activities.
+5. Areas NOT scheduled that day must be set to null in the JSON.
+6. Reading: pick ONE real age-appropriate children's book per day. actId must be null for Reading.
+
+Good 2-week rotation example (areas per day):
+Week 1: Mon(PL+Sensorial), Tue(PL+Sensorial), Wed(Lang+Math), Thu(Lang+Math), Fri(Cultural+Sensorial)
+Week 2: Mon(PL+Lang), Tue(PL+Lang), Wed(Math+Cultural), Thu(Math+Cultural), Fri(Sensorial+Cultural)
+
+School days:
+Week 1: ${lpSchoolDays.slice(0,5).map(d=>`${d.dayName} ${d.date}`).join(', ')}
+Week 2: ${lpSchoolDays.slice(5,10).map(d=>`${d.dayName} ${d.date}`).join(', ')}
+
+Respond with ONLY valid JSON, no other text:
+{
+  "studentName": "${lpStu.name}",
+  "studentId": "${studentId}",
+  "program": "${lpStu.program || ''}",
+  "planStart": "${lpStartDate}",
+  "planEnd": "${lpPlanEnd}",
+  "deviations": [],
+  "weeks": [
+    {
+      "weekNum": 1,
+      "days": [
+        {
+          "date": "YYYY-MM-DD",
+          "dayName": "Mon",
+          "activities": {
+            "Practical Life":    { "actId": "recXXX", "name": "exact name from pool" },
+            "Sensorial":         { "actId": "recXXX", "name": "exact name from pool" },
+            "Language":          null,
+            "Math":              null,
+            "Cultural/Science":  null,
+            "Reading":           { "actId": null, "name": "Book Title by Author Name" }
+          }
+        }
+      ]
+    },
+    { "weekNum": 2, "days": [ ... ] }
+  ]
+}`;
+
+    const lpResp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': lpApiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 8192, messages: [{ role: 'user', content: lpPrompt }] })
+    });
+
+    if (!lpResp.ok) {
+      const lpErr = await lpResp.json().catch(() => ({}));
+      throw new Error(lpErr.error?.message || `API error ${lpResp.status}`);
+    }
+
+    const lpResult = await lpResp.json();
+    let lpText = (lpResult.content?.[0]?.text || '').trim();
+    // Strip markdown code fences if present
+    lpText = lpText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+    const lpJsonMatch = lpText.match(/\{[\s\S]*\}/);
+    if (!lpJsonMatch) throw new Error('AI returned unexpected format. Please try again.');
+
+    // Attempt to parse; if truncated, try to recover by closing open structures
+    let lpParsed;
+    try {
+      lpParsed = JSON.parse(lpJsonMatch[0]);
+    } catch(lpParseErr) {
+      // Try to salvage truncated JSON by trimming to last complete week
+      const lpTruncated = lpJsonMatch[0].replace(/,?\s*\{[^{}]*$/, '').replace(/,?\s*\[[^\[\]]*$/, '');
+      const lpFixed = lpTruncated + (lpTruncated.match(/\[/g)||[]).length - (lpTruncated.match(/\]/g)||[]).length > 0
+        ? ']'.repeat((lpTruncated.match(/\[/g)||[]).length - (lpTruncated.match(/\]/g)||[]).length) + '}'
+        : '}';
+      try { lpParsed = JSON.parse(lpFixed); }
+      catch(_) { throw new Error('Plan generation returned incomplete JSON. Please try again (token limit may be too low).'); }
+    }
+
+    // Validate: every non-Reading actId must exist in inventory
+    const lpActIdSet = new Set(state.activities.map(a => a.id));
+    let lpHasInvalid = false;
+    (lpParsed.weeks || []).forEach(w => (w.days || []).forEach(d => {
+      Object.entries(d.activities || {}).forEach(([area, act]) => {
+        if (area !== 'Reading' && act.actId && !lpActIdSet.has(act.actId)) lpHasInvalid = true;
+      });
+    }));
+    if (lpHasInvalid) throw new Error('Plan included activities outside the curriculum inventory. Please regenerate.');
+
+    if (!lpParsed.deviations) lpParsed.deviations = [];
+    state.lpTabPlans[studentId] = lpParsed;  // cache for instant switching
+    if (!background) {
+      state.lpTabPlanData    = lpParsed;
+      state.lpTabSavedPlanId = null;
+    }
+    // After foreground plan completes, kick off background pre-gen for remaining children
+    if (!background) generateAllPlansBackground(studentId);
+
+  } catch(lpCatchErr) {
+    if (!background) state.lpTabError = lpCatchErr.message || 'Failed to generate plan.';
+  }
+  if (!background) { state.lpTabLoading = false; }
+  render();
+}
+
+// Generate plans via Claude for any students who have no saved plan in Airtable
+async function generateAllPlansBackground(skipId) {
+  if (state.lpTabBgGenerating) return; // already running
+  // Wait for bulk Airtable load to finish first
+  if (state.lpTabBgLoading) return;
+  const lpBgStudents = [...state.students]
+    .filter(s => !/\btest\b/i.test(s.name) && (!skipId || s.id !== skipId))
+    .sort((a,b) => a.name.localeCompare(b.name))
+    .filter(s => !state.lpTabPlans[s.id]); // only those with no saved plan
+  if (lpBgStudents.length === 0) return;
+  state.lpTabBgGenerating = true; render();
+  for (const s of lpBgStudents) {
+    if (state.lpTabPlans[s.id]) continue; // cached since we started
+    await new Promise(r => setTimeout(r, 700)); // rate-limit buffer
+    try { await generateLessonPlan(s.id, true); } catch(_) { /* silent */ }
+  }
+  state.lpTabBgGenerating = false; render();
+}
+
+async function reviseLessonPlan(studentId) {
+  const lpRevEl = document.getElementById('lp-tab-revision-input');
+  if (lpRevEl) state.lpTabRevisionPrompt = lpRevEl.value.trim();
+  if (!state.lpTabRevisionPrompt) return;
+  state.lpTabRevising = true;
+  delete state.lpTabPlans[studentId]; // clear cache so forceRegenerate works
+  render();
+  await generateLessonPlan(studentId, false, true); // forceRegenerate = true
+  state.lpTabRevising = false;
+}
+
+async function saveLessonPlan(studentId) {
+  if (!state.lpTabPlanData || state.lpTabSaving) return;
+  state.lpTabSaving = true; state.lpTabError = ''; render();
+  try {
+    const lpSaveStu  = state.students.find(s => s.id === studentId) || {};
+    const lpSavePlan = state.lpTabPlanData;
+    const lpTitle2   = `${lpSaveStu.name} – ${fmtDate(lpSavePlan.planStart)} to ${fmtDate(lpSavePlan.planEnd)}`;
+    const lpFields   = {
+      [FIELD.lpTitle]:       lpTitle2,
+      [FIELD.lpStart]:       lpSavePlan.planStart,
+      [FIELD.lpEnd]:         lpSavePlan.planEnd,
+      [FIELD.lpJson]:        JSON.stringify(lpSavePlan),
+      [FIELD.lpCreatedDate]: todayET(),
+      [FIELD.lpStudent]:     [studentId],
+    };
+    if (state.teacherRecordId)       lpFields[FIELD.lpCreatedBy]     = [state.teacherRecordId];
+    if (state.lpTabRevisionPrompt)   lpFields[FIELD.lpRevisionNotes] = state.lpTabRevisionPrompt;
+    const lpResp = await airtable(`${TABLES.lessonPlans}?returnFieldsByFieldId=true`, {
+      method: 'POST',
+      body: JSON.stringify({ records: [{ fields: lpFields }] })
+    });
+    state.lpTabSavedPlanId = lpResp.records[0].id;
+  } catch(lpSaveErr) {
+    state.lpTabError = 'Save failed: ' + lpSaveErr.message;
+  }
+  state.lpTabSaving = false; render();
+}
+
+async function checkLessonPlanDivergence(studentId, loggedActId, loggedActName, loggedSubject, date) {
+  try {
+    const plans = await fetchAll(TABLES.lessonPlans, [], null, true);
+    const matching = plans.filter(r => {
+      const stuLinks = r.fields[FIELD.lpStudent] || [];
+      const start    = r.fields[FIELD.lpStart]   || '';
+      const end      = r.fields[FIELD.lpEnd]     || '';
+      const stuIds   = stuLinks.map(l => typeof l === 'object' ? l.id : l);
+      return stuIds.includes(studentId) && date >= start && date <= end;
+    });
+    if (!matching.length) return;
+
+    const planRec  = matching[0];
+    const planJson = JSON.parse(planRec.fields[FIELD.lpJson] || '{}');
+
+    let plannedAct = null;
+    (planJson.weeks || []).forEach(w => (w.days || []).forEach(d => {
+      if (d.date !== date) return;
+      Object.entries(d.activities || {}).forEach(([area, act]) => {
+        if (!act.actId || act.actId === loggedActId) return;
+        const planAct = state.activities.find(a => a.id === act.actId);
+        if (planAct && (planAct.subject || '').toLowerCase().includes((loggedSubject||'').toLowerCase().split(' ')[0])) {
+          if (!plannedAct) plannedAct = { area, actId: act.actId, name: act.name };
+        }
+      });
+    }));
+
+    if (!plannedAct) return;
+
+    state.lpDivModal         = true;
+    state.lpDivActId         = loggedActId;
+    state.lpDivStudentId     = studentId;
+    state.lpDivDate          = date;
+    state.lpDivSubject       = loggedSubject;
+    state.lpDivPlannedActId  = plannedAct.actId;
+    state.lpDivPlannedActName = plannedAct.name;
+    state.lpDivReason        = '';
+    state.lpDivReasonOther   = '';
+    state.lpDivPlanRecordId  = planRec.id;
+    state.lpDivPlanJson      = planJson;
+    render();
+  } catch(e) { /* non-critical */ }
+}
+
+async function saveDeviation() {
+  const otherEl = document.getElementById('div-reason-other');
+  if (otherEl) state.lpDivReasonOther = otherEl.value.trim();
+  const finalReason = state.lpDivReason === 'Other'
+    ? (state.lpDivReasonOther || 'Other') : state.lpDivReason;
+  if (!finalReason) return;
+  try {
+    const deviation = {
+      date:            state.lpDivDate,
+      subject:         state.lpDivSubject,
+      plannedActId:    state.lpDivPlannedActId,
+      plannedActName:  state.lpDivPlannedActName,
+      loggedActId:     state.lpDivActId,
+      loggedActName:   (state.activities.find(a => a.id === state.lpDivActId)||{}).name || '',
+      reason:          finalReason,
+      capturedBy:      state.teacherRecordId || '',
+      capturedAt:      todayET(),
+    };
+    const planJson = state.lpDivPlanJson || {};
+    planJson.deviations = [...(planJson.deviations || []), deviation];
+    await airtable(`${TABLES.lessonPlans}/${state.lpDivPlanRecordId}?returnFieldsByFieldId=true`, {
+      method: 'PATCH',
+      body: JSON.stringify({ fields: { [FIELD.lpJson]: JSON.stringify(planJson) } })
+    });
+    if (state.lpTabPlanData && state.lpTabSavedPlanId === state.lpDivPlanRecordId) {
+      state.lpTabPlanData = planJson;
+    }
+  } catch(e) { /* non-critical */ }
+  state.lpDivModal = false; render();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// LESSON PLANS TAB
+// ═══════════════════════════════════════════════════════════════════════
+function renderLessonPlansTab() {
+  const isTestStudent = s => /\btest\b/i.test(s.name);
+  const lpStudents = [...state.students]
+    .filter(s => !isTestStudent(s))
+    .sort((a,b) => a.name.localeCompare(b.name));
+
+  const lpStu = state.lpTabStudentId
+    ? lpStudents.find(s => s.id === state.lpTabStudentId) : null;
+
+  // ── Child selector dropdown ───────────────────────────────────────────
+  const lpQ = (state.lpTabSearch || '').toLowerCase();
+  const lpDropOptions = lpStudents.filter(s => !lpQ || s.name.toLowerCase().includes(lpQ)).slice(0, 25);
+  const lpDropList = state.lpTabDropdownOpen ? `
+    <div style="position:absolute;top:calc(100% + 4px);left:0;min-width:100%;background:white;border:1px solid #ddd;border-radius:8px;z-index:50;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,.12)">
+      <input id="lp-tab-child-search" type="text" placeholder="Search by name…" value="${state.lpTabSearch||''}"
+        style="width:100%;padding:8px 10px;border:none;border-bottom:1px solid #eee;font-size:13px;outline:none;box-sizing:border-box">
+      <div style="max-height:220px;overflow-y:auto">
+        ${lpDropOptions.length === 0
+          ? `<div style="padding:10px 12px;font-size:13px;color:#aaa">No children found</div>`
+          : lpDropOptions.map(s => {
+              const isSel = s.id === state.lpTabStudentId;
+              const hasPlan = !!state.lpTabPlans[s.id];
+              const init = s.name.split(' ').map(p=>p[0]).join('').slice(0,2).toUpperCase();
+              return `<div data-lptabchild="${s.id}"
+                style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;
+                       background:${isSel?'#E3F2FD':'white'};color:${isSel?'#1565C0':'#212121'};font-weight:${isSel?'600':'400'};font-size:13px"
+                onmouseover="this.style.background='${isSel?'#BBDEFB':'#f5f5f5'}'"
+                onmouseout="this.style.background='${isSel?'#E3F2FD':'white'}'">
+                <div style="width:24px;height:24px;border-radius:50%;background:#E3F2FD;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:#1565C0;flex-shrink:0">${init}</div>
+                <span style="flex:1">${s.name}</span>
+                ${hasPlan ? '<span style="font-size:10px;color:#2E7D32">✓ cached</span>' : ''}
+              </div>`;
+            }).join('')}
+      </div>
+    </div>` : '';
+
+  const chipRow = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+      <span style="font-size:12px;color:#888;white-space:nowrap">Child:</span>
+      <div id="lp-tab-child-wrap" style="position:relative;min-width:220px;max-width:320px">
+        <div id="lp-tab-child-input" style="display:flex;align-items:center;gap:8px;padding:7px 10px;
+          border:1px solid ${lpStu?'#1976D2':'#ddd'};border-radius:8px;background:white;cursor:pointer;
+          font-size:13px;color:${lpStu?'#1565C0':'#888'};user-select:none">
+          ${lpStu ? `<div style="width:22px;height:22px;border-radius:50%;background:#E3F2FD;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:#1565C0;flex-shrink:0">${lpStu.name.split(' ').map(p=>p[0]).join('').slice(0,2).toUpperCase()}</div>` : ''}
+          <span style="flex:1">${lpStu ? lpStu.name : 'Select child…'}</span>
+          <span style="color:#bbb;font-size:11px">▾</span>
+        </div>
+        ${lpDropList}
+      </div>
+      ${state.lpTabLoading ? `<span style="font-size:12px;color:#888">⟳ Generating plan…</span>` : ''}
+      ${!state.lpTabLoading && lpStu ? (() => {
+        const lpCachedN = Object.keys(state.lpTabPlans||{}).length;
+        const lpTotalN  = lpStudents.length;
+        const lpBgMsg   = state.lpTabBgLoading
+          ? `<span style="font-size:11px;color:#1565C0">⟳ Loading saved plans…</span>`
+          : state.lpTabBgGenerating
+          ? `<span style="font-size:11px;color:#F57C00">⟳ Generating new plans… ${lpCachedN}/${lpTotalN} ready</span>`
+          : `<span style="font-size:11px;color:#2E7D32">✓ ${lpCachedN}/${lpTotalN} plans ready</span>`;
+        return lpBgMsg;
+      })() : ''}
+    </div>`;
+
+  // ── No child selected ─────────────────────────────────────────────────
+  if (!state.lpTabStudentId) {
+    return `<div style="padding:20px 0">
+      ${chipRow}
+      <div style="text-align:center;padding:48px 0;color:#aaa;font-size:14px">
+        Select a child above to generate their 2-week lesson plan
+      </div>
+      ${renderDeviationModal()}
+    </div>`;
+  }
+
+  // ── Loading ───────────────────────────────────────────────────────────
+  if (state.lpTabLoading) {
+    return `<div style="padding:20px 0">
+      ${chipRow}
+      <div style="text-align:center;padding:48px 0">
+        <div style="font-size:28px;margin-bottom:12px">🤖</div>
+        <div style="font-size:15px;font-weight:600;color:#212121;margin-bottom:6px">Generating plan for ${lpStu ? lpStu.name : ''}…</div>
+        <div class="spinner" style="margin:12px auto">⟳</div>
+        <div style="font-size:12px;color:#888;margin-top:10px">Analysing curriculum progress · selecting from inventory · building 2-week schedule</div>
+      </div>
+      ${renderDeviationModal()}
+    </div>`;
+  }
+
+  // ── Error / no plan yet ───────────────────────────────────────────────
+  if (!state.lpTabPlanData) {
+    return `<div style="padding:20px 0">
+      ${chipRow}
+      ${state.lpTabError ? `<div style="background:#FFEBEE;border:1px solid #FFCDD2;border-radius:8px;padding:12px 16px;font-size:13px;color:#C62828;margin-bottom:14px">
+        ${state.lpTabError}
+        <button onclick="generateLessonPlan('${state.lpTabStudentId}')"
+          style="margin-left:12px;padding:5px 12px;background:#7B1FA2;color:white;border:none;border-radius:6px;font-size:11px;cursor:pointer">↺ Try Again</button>
+      </div>` : ''}
+      <div style="text-align:center;padding:40px 0;color:#aaa;font-size:14px">
+        <div style="font-size:28px;margin-bottom:12px">📅</div>
+        Preparing plan…
+      </div>
+      ${renderDeviationModal()}
+    </div>`;
+  }
+
+  // ── Mastery gap bar (stacked: Mastered | Working Well | In Progress | Presented) ──
+  let lpGapBar = '';
+  if (state.globalSas && lpStu) {
+    try {
+      const lpStats = computeStudentStats(lpStu);
+      const lpAreas = Object.entries(lpStats.bySubject)
+        .map(([sub, d]) => {
+          const engaged = d.mastered + d.workingWell + d.inProgress + d.presented;
+          const mastPct  = d.total > 0 ? Math.round(d.mastered     / d.total * 100) : 0;
+          const wwPct    = d.total > 0 ? Math.round(d.workingWell  / d.total * 100) : 0;
+          const ipPct    = d.total > 0 ? Math.round(d.inProgress   / d.total * 100) : 0;
+          const prePct   = d.total > 0 ? Math.round(d.presented    / d.total * 100) : 0;
+          const engPct   = d.total > 0 ? Math.round(engaged         / d.total * 100) : 0;
+          return { sub, mastPct, wwPct, ipPct, prePct, engPct, total: d.total };
+        })
+        .filter(x => x.total > 0)
+        .sort((a,b) => a.engPct - b.engPct); // least engaged first = plan prioritises these
+
+      lpGapBar = `
+        <div style="background:#F8F9FA;border:1px solid #e0e0e0;border-radius:8px;padding:12px 16px;margin-bottom:14px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+            <div style="font-size:11px;font-weight:600;color:#888">PROGRESS BY AREA · plan prioritises least-engaged areas first</div>
+            <div style="display:flex;gap:10px;font-size:10px;color:#888">
+              <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#1D9E75;margin-right:3px"></span>Mastered</span>
+              <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#5DCAA5;margin-right:3px"></span>Working Well</span>
+              <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#5B9BD5;margin-right:3px"></span>In Progress</span>
+              <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#B0BEC5;margin-right:3px"></span>Presented</span>
+            </div>
+          </div>
+          ${lpAreas.map(({sub, mastPct, wwPct, ipPct, prePct, engPct}) => `
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">
+              <div style="font-size:11px;width:130px;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sub}</div>
+              <div style="flex:1;height:7px;background:#e8e8e8;border-radius:4px;overflow:hidden;display:flex">
+                <div style="width:${mastPct}%;height:7px;background:#1D9E75"></div>
+                <div style="width:${wwPct}%;height:7px;background:#5DCAA5"></div>
+                <div style="width:${ipPct}%;height:7px;background:#5B9BD5"></div>
+                <div style="width:${prePct}%;height:7px;background:#B0BEC5"></div>
+              </div>
+              <div style="font-size:11px;color:#888;width:34px;text-align:right">${engPct}%</div>
+              ${engPct < 15 ? '<span style="font-size:9px;background:#FFF8E1;color:#F57F17;padding:1px 5px;border-radius:4px;font-weight:600">focus</span>' : ''}
+            </div>`).join('')}
+        </div>`;
+    } catch(e) {}
+  }
+
+  // ── Plan grid ─────────────────────────────────────────────────────────
+  const lpPlan     = state.lpTabPlanData;
+  const lpAreas    = ['Practical Life','Sensorial','Language','Math','Cultural/Science','Reading'];
+  const lpAreaColors = {
+    'Practical Life':    { bg:'#E3F2FD', tc:'#1565C0' },
+    'Sensorial':         { bg:'#F3E5F5', tc:'#6A1B9A' },
+    'Language':          { bg:'#E8F5E9', tc:'#2E7D32' },
+    'Math':              { bg:'#FFF8E1', tc:'#F57F17' },
+    'Cultural/Science':  { bg:'#FCE4EC', tc:'#AD1457' },
+    'Reading':           { bg:'#FFF3E0', tc:'#E65100' },
+  };
+  const lpAllDays  = (lpPlan.weeks || []).flatMap(w => w.days || []);
+  const lpMonths   = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const lpTodayIso = todayET();
+
+  // Deviation lookup: date+subject → deviation record
+  const lpDevMap = {};
+  (lpPlan.deviations || []).forEach(dv => { lpDevMap[dv.date + '|' + dv.subject] = dv; });
+
+  // 4-state tracking
+  function lpTrack(area, dayDate, plannedActId) {
+    if (dayDate > lpTodayIso) return { tState:'planned', loggedName:'' };
+    if (!state.logData) return { tState:'missed', loggedName:'' };
+    const sData = state.logData[state.lpTabStudentId] || {};
+    if (area === 'Reading') {
+      const rl = (sData.readingLogs||[]).find(r => r.date === dayDate);
+      return rl ? { tState:'completed', loggedName: rl.bookTitle||'' } : { tState:'missed', loggedName:'' };
+    }
+    const updates = (sData.statusUpdates||[]).filter(u => u.date === dayDate);
+    if (!updates.length) return { tState:'missed', loggedName:'' };
+    // Exact actId match
+    const exact = updates.find(u => u.activityId === plannedActId);
+    if (exact) return { tState:'completed', loggedName: exact.activityName||'' };
+    // Same subject, different activity
+    const planAct = state.activities.find(a => a.id === plannedActId);
+    const planSubj = planAct ? planAct.subject : '';
+    const diff = updates.find(u => {
+      const la = state.activities.find(a => a.id === u.activityId);
+      return la && planSubj && la.subject === planSubj;
+    });
+    if (diff) return { tState:'different', loggedName: diff.activityName||'' };
+    return { tState:'missed', loggedName:'' };
+  }
+
+  const lpStateIcon = { completed:'✅', planned:'🔲', missed:'❌', different:'🔄' };
+  const lpStateBg   = { completed:'#F1F8E9', planned:'white', missed:'#FFF5F5', different:'#FFF8E1' };
+
+  const lpWeekHeaders = (lpPlan.weeks||[]).map(w =>
+    `<th colspan="${(w.days||[]).length}" style="padding:4px 8px;background:#ECEFF1;border:1px solid #e0e0e0;font-size:10px;font-weight:600;text-align:center;color:#546E7A">Week ${w.weekNum}</th>`
+  ).join('');
+
+  const lpDayHeaders = lpAllDays.map(day => {
+    const dt = new Date(day.date + 'T12:00:00');
+    return `<th style="padding:6px 8px;background:#F5F5F5;border:1px solid #e0e0e0;font-size:11px;font-weight:600;text-align:center;min-width:100px">
+      ${day.dayName}<br><span style="font-size:10px;font-weight:400">${lpMonths[dt.getMonth()]} ${dt.getDate()}</span>
+    </th>`;
+  }).join('');
+
+  const lpAreaRows = lpAreas.map(area => {
+    const { bg, tc } = lpAreaColors[area] || { bg:'#F5F5F5', tc:'#555' };
+    const cells = lpAllDays.map(day => {
+      const rawAct = (day.activities||{})[area]; // null = not scheduled; {} = missing
+      // null explicitly means "not scheduled this day"
+      if (rawAct === null) {
+        return `<td style="padding:7px 9px;border:1px solid #e0e0e0;background:#FAFAFA"></td>`;
+      }
+      const act = rawAct || {};
+      const actName = act.name || '—';
+      const { tState, loggedName } = lpTrack(area, day.date, act.actId);
+      const devKey = day.date + '|' + area;
+      const dev = lpDevMap[devKey];
+      let cellContent = `<div style="color:#333;font-size:11px;line-height:1.4">${actName}</div>`;
+      if (tState === 'different') {
+        cellContent += `<div style="font-size:10px;color:#E65100;margin-top:2px">Done: ${loggedName}</div>`;
+        if (dev) {
+          cellContent += `<div style="font-size:9px;color:#888;margin-top:1px;font-style:italic">Reason: ${dev.reason}</div>`;
+        }
+      }
+      cellContent += `<div style="margin-top:3px;font-size:11px">${lpStateIcon[tState]}</div>`;
+      return `<td style="padding:7px 9px;border:1px solid #e0e0e0;vertical-align:top;background:${lpStateBg[tState]}">${cellContent}</td>`;
+    }).join('');
+
+    return `<tr>
+      <td style="padding:7px 10px;border:1px solid #e0e0e0;background:#FAFAFA;position:sticky;left:0;z-index:2;white-space:nowrap">
+        <span style="padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600;background:${bg};color:${tc}">${area}</span>
+      </td>
+      ${cells}
+    </tr>`;
+  }).join('');
+
+  const lpMinW = 130 + lpAllDays.length * 100;
+
+  // Deviation summary (if any)
+  const devList = lpPlan.deviations || [];
+  const devSummary = devList.length ? `
+    <div style="background:#FFF8E1;border:1px solid #FFE082;border-radius:8px;padding:12px 16px;margin-bottom:14px">
+      <div style="font-size:11px;font-weight:600;color:#888;margin-bottom:8px">PLAN DEVIATIONS (${devList.length})</div>
+      ${devList.map(dv => `<div style="font-size:11px;color:#555;margin-bottom:4px">
+        🔄 <strong>${dv.date}</strong> · ${dv.subject} · Planned: "${dv.plannedActName}" → Done: "${dv.loggedActName}"
+        <span style="color:#888"> · ${dv.reason}</span>
+      </div>`).join('')}
+    </div>` : '';
+
+  const lpSavedBadge = state.lpTabSavedPlanId
+    ? `<span style="font-size:11px;color:#2E7D32;font-weight:600">✅ Saved</span>` : '';
+
+  return `<div style="padding:0">
+    ${chipRow}
+    ${lpGapBar}
+    ${devSummary}
+    <div style="font-size:12px;color:#888;margin-bottom:8px">
+      📅 ${lpPlan.studentName} · ${fmtDate(lpPlan.planStart)} – ${fmtDate(lpPlan.planEnd)} · inventory-based plan
+    </div>
+    <div style="border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;margin-bottom:14px">
+      <div style="overflow-x:auto">
+        <table style="border-collapse:collapse;width:100%;min-width:${lpMinW}px">
+          <thead>
+            <tr>
+              <th style="padding:4px 8px;background:#ECEFF1;border:1px solid #e0e0e0;font-size:10px;position:sticky;left:0;z-index:3"></th>
+              ${lpWeekHeaders}
+            </tr>
+            <tr>
+              <th style="padding:6px 10px;background:#F5F5F5;border:1px solid #e0e0e0;font-size:11px;font-weight:600;text-align:left;position:sticky;left:0;z-index:3;white-space:nowrap">Area</th>
+              ${lpDayHeaders}
+            </tr>
+          </thead>
+          <tbody>${lpAreaRows}</tbody>
+        </table>
+      </div>
+      <div style="padding:7px 14px;display:flex;gap:14px;font-size:11px;color:#666;flex-wrap:wrap;border-top:1px solid #f0f0f0">
+        <span>✅ Completed as planned</span><span>🔄 Done (different activity)</span><span>❌ Missed</span><span>🔲 Upcoming</span>
+      </div>
+    </div>
+
+    <div style="background:#F8F9FA;border:1px solid #e0e0e0;border-radius:8px;padding:12px 16px;margin-bottom:12px">
+      <div style="font-size:12px;font-weight:600;color:#444;margin-bottom:8px">Revise this plan (optional)</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="lp-tab-revision-input" value="${state.lpTabRevisionPrompt||''}"
+          placeholder='e.g. "more outdoor science in week 2" or "focus on language"'
+          style="flex:1;min-width:200px;padding:8px 12px;border:1px solid #ddd;border-radius:8px;font-size:12px;outline:none">
+        <button onclick="reviseLessonPlan('${state.lpTabStudentId}')"
+          style="padding:8px 16px;background:#5C6BC0;color:white;border:none;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap"
+          ${state.lpTabRevising ? 'disabled' : ''}>
+          ${state.lpTabRevising ? '⟳ Revising…' : '↺ Revise & Regenerate'}
+        </button>
+      </div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;padding-bottom:16px">
+      ${lpSavedBadge}
+      ${state.lpTabError ? `<span style="font-size:12px;color:#C62828">${state.lpTabError}</span>` : ''}
+      <button onclick="generateLessonPlan('${state.lpTabStudentId}')"
+        style="padding:8px 16px;background:white;border:1px solid #ddd;border-radius:8px;font-size:13px;cursor:pointer;color:#555">
+        ↺ Regenerate
+      </button>
+      <button onclick="saveLessonPlan('${state.lpTabStudentId}')"
+        style="padding:8px 22px;background:${state.lpTabSaving?'#aaa':'#1976D2'};color:white;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer"
+        ${state.lpTabSaving ? 'disabled' : ''}>
+        ${state.lpTabSaving ? '⟳ Saving…' : '💾 Save Plan'}
+      </button>
+    </div>
+    ${renderDeviationModal()}
   </div>`;
 }
 
@@ -4892,6 +6089,277 @@ async function loadBookLibrary() {
   }
   state.booksLoading = false;
   render();
+}
+
+// ── ISBN Auto-Lookup via Open Library ─────────────────────────────────────
+async function lookupISBN() {
+  const isbnRaw = (document.getElementById('bf-isbn-lookup')?.value || '').replace(/[^0-9X]/gi, '');
+  const statusEl = document.getElementById('bf-isbn-status');
+  const btn = document.getElementById('bf-isbn-lookup-btn');
+  if (!isbnRaw || (isbnRaw.length !== 10 && isbnRaw.length !== 13)) {
+    if (statusEl) statusEl.textContent = '⚠ Please enter a valid 10 or 13-digit ISBN.';
+    return;
+  }
+  if (btn) { btn.textContent = '⟳ Looking up…'; btn.disabled = true; }
+  if (statusEl) statusEl.textContent = '';
+  try {
+    // Open Library Books API — free, no key required
+    const res = await fetch(`https://openlibrary.org/api/books?bibkeys=ISBN:${isbnRaw}&format=json&jscmd=data`);
+    if (!res.ok) throw new Error('Network error');
+    const json = await res.json();
+    const key = `ISBN:${isbnRaw}`;
+    if (!json[key]) {
+      if (statusEl) statusEl.textContent = '⚠ Book not found. Try the 13-digit ISBN or fill in manually.';
+      return;
+    }
+    const d = json[key];
+
+    // ── Helper to set field value ──
+    const setField = (id, val) => { const el = document.getElementById(id); if (el && val) el.value = val; };
+
+    // Title
+    setField('bf-title', d.title);
+
+    // Authors
+    if (d.authors?.length) setField('bf-author', d.authors.map(a => a.name).join(', '));
+
+    // Publisher
+    if (d.publishers?.length) setField('bf-publisher', d.publishers[0].name);
+
+    // ISBN (pre-fill the actual field in the form)
+    setField('bf-isbn', isbnRaw);
+
+    // Page count
+    if (d.number_of_pages) setField('bf-pages', d.number_of_pages);
+
+    // Subjects → used for tags + genre/category inference
+    const subjects = (d.subjects || []).map(s => (s.name || s).toLowerCase());
+    const subjectStr = subjects.join(' ');
+
+    // ── Infer Genre ──
+    const genreEl = document.getElementById('bf-genre');
+    if (genreEl && !genreEl.value) {
+      // Only exact Airtable singleSelect values — never create new options
+      const genreMap = [
+        ['Nursery Rhymes',              /nursery rhyme|rhyme|poetry/],
+        ['Music / Songs',               /music|songs|song book|musical|lullaby|lullabies/],
+        ['Fairy Tale / Fable',          /fairy tale|folk tale|folklore|fable/],
+        ['Moral Fable',                 /moral|fable|parable/],
+        ['Fantasy',                     /fantasy|magic|wizard|dragon/],
+        ['Board Book',                  /board book|baby book|infant book|toddler book/],
+        ['Early Reader',                /early reader|beginning reader|easy reader|i can read/],
+        ['Chapter Book',                /chapter book|middle grade|novel for children/],
+        ['Story Book',                  /story book|storybook|illustrated story/],
+        ['Alphabet & Language',         /alphabet|abc|letters|language/],
+        ['Numbers & Math',              /math|numbers|counting|arithmetic/],
+        ['Shapes & Colors',             /colors|colours|shapes|colors/],
+        ['Science & Nature',            /science|nature|biology|ecology|environment|earth/],
+        ['Animal Story',                /animal story|animals and stories/],
+        ['Animals',                     /animals|wildlife|pets|zoo|birds|insects/],
+        ['Vehicles & Transport',        /vehicles|transport|trains|cars|trucks|planes/],
+        ['Culture & Social Studies',    /culture|multicultural|world|geography|history|social/],
+        ['SEL / Family & Relationships',/family|friendship|emotion|feelings|kindness|empathy|relationship/],
+        ['Concepts',                    /concept|educational|learning|early childhood/],
+        ['Activity & Coloring',         /activity|coloring|interactive|workbook/],
+        ['Dictionary & Reference',      /dictionary|reference|encyclopedia/],
+        ['Picture Book',                /picture book|picture books/],
+        ['Read-Aloud',                  /read.aloud|read aloud|storytime/],
+      ];
+      for (const [genre, rx] of genreMap) {
+        if (rx.test(subjectStr)) { genreEl.value = genre; break; }
+      }
+    }
+
+    // ── Infer Category — Airtable only has Fiction / Non-Fiction ──
+    const catEl = document.getElementById('bf-category');
+    if (catEl && !catEl.value) {
+      catEl.value = /nonfiction|non-fiction|science|nature|history|biography|concept|educational/.test(subjectStr)
+        ? 'Non-Fiction' : 'Fiction';
+    }
+
+    // ── Auto-generate Tags ──
+    const tagSet = new Set();
+    // Subject-based tags
+    const tagKeywords = [
+      'friendship','family','nature','animals','seasons','emotions','diversity',
+      'science','math','alphabet','counting','colors','shapes','music','art',
+      'community','kindness','adventure','imagination','bilingual','spanish',
+      'french','mandarin','culture','history','geography','environment','body',
+      'food','transportation','occupations','feelings','self-care','sensorial',
+      'practical life','language','cognitive','social','emotional','montessori',
+    ];
+    for (const kw of tagKeywords) {
+      if (subjectStr.includes(kw)) tagSet.add(kw);
+    }
+    // Add top 3 clean subject names directly
+    subjects.slice(0, 3).forEach(s => { const clean = s.replace(/[^a-z0-9 ]/g,'').trim(); if (clean.length > 2 && clean.length < 30) tagSet.add(clean); });
+
+    const tagsEl = document.getElementById('bf-tags');
+    if (tagsEl && tagSet.size) {
+      const existing = tagsEl.value.trim();
+      const merged = [...new Set([...existing.split(',').map(t=>t.trim()).filter(Boolean), ...tagSet])];
+      tagsEl.value = merged.join(', ');
+    }
+
+    if (statusEl) { statusEl.innerHTML = '✅ <strong>Book found!</strong> Fields filled — review and adjust as needed.'; statusEl.style.color = '#15803D'; }
+  } catch(e) {
+    if (statusEl) { statusEl.textContent = '⚠ Lookup failed: ' + e.message; statusEl.style.color = '#B91C1C'; }
+  } finally {
+    if (btn) { btn.textContent = 'Look Up'; btn.disabled = false; }
+  }
+}
+
+// ── Delete Book (soft for staff, hard for admin) ──────────────────────────
+
+// Fetches all Reading Log records linked to a book by client-side filtering.
+// Cannot use ARRAYJOIN in Airtable formula — linked fields return primary field
+// values (titles), not record IDs, so the formula would silently match nothing.
+async function getLinkedReadingLogs(recordId) {
+  const allLogs = await fetchAll(TABLES.readingLog, [], null);
+  return allLogs.filter(r => {
+    const links = r.fields['book'] || r.fields[FIELD.rlBook] || [];
+    return links.some(l => (typeof l === 'object' ? l.id : l) === recordId);
+  });
+}
+
+async function deleteBook(recordId) {
+  const title = state.books.find(b => b.id === recordId)?.title || 'this book';
+  const isAdm = state.teacherRole === 'Admin';
+
+  // ── Staff: soft delete — blocked if any Reading Log entries exist ─────
+  if (!isAdm) {
+    let linked;
+    try {
+      linked = await getLinkedReadingLogs(recordId);
+    } catch (e) {
+      alert(`❌ Cannot delete "${title}"\n\nUnable to verify this book's Reading Log links. Please contact an admin.\n\n(${e.message})`);
+      return;
+    }
+
+    if (linked.length > 0) {
+      alert(`❌ Cannot delete "${title}"\n\nThis book has ${linked.length} Reading Log ${linked.length === 1 ? 'entry' : 'entries'} linked to it and cannot be removed by staff.\n\nPlease contact an admin to remove this book.`);
+      return;
+    }
+
+    if (!confirm(`Remove "${title}" from the catalog?\n\nThe book will be marked inactive and hidden from all views. An admin can restore it if needed.`)) return;
+    try {
+      await airtable(`${TABLES.books}/${recordId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ fields: { [BOOK_FIELD.active]: false } }),
+      });
+      state.books = state.books.filter(b => b.id !== recordId);
+      render();
+    } catch (e) {
+      alert('Delete failed: ' + e.message);
+    }
+    return;
+  }
+
+  // ── Admin: hard delete with cascade ──────────────────────────────────
+  let linkedLogs;
+  try {
+    linkedLogs = await getLinkedReadingLogs(recordId);
+  } catch (e) {
+    // Block if we can't verify — never risk orphaning records silently
+    alert(`❌ Cannot delete "${title}"\n\nUnable to verify Reading Log links before deletion. Please try again.\n\n(${e.message})`);
+    return;
+  }
+
+  const logWarning = linkedLogs.length
+    ? `\n\n⚠️ This book has ${linkedLogs.length} Reading Log ${linkedLogs.length === 1 ? 'entry' : 'entries'} that will also be permanently deleted.`
+    : '';
+
+  if (!confirm(`⚠️ Permanently delete "${title}"?\n\nThis CANNOT be undone. The book will be removed from Airtable entirely.${logWarning}`)) return;
+
+  try {
+    // 1. Delete linked Reading Log records first (Airtable batch limit = 10)
+    const logIds = linkedLogs.map(r => r.id);
+    for (let i = 0; i < logIds.length; i += 10) {
+      const params = logIds.slice(i, i + 10).map(id => `records[]=${id}`).join('&');
+      await airtable(`${TABLES.readingLog}?${params}`, { method: 'DELETE' });
+    }
+
+    // 2. Hard delete the book itself
+    await airtable(`${TABLES.books}/${recordId}`, { method: 'DELETE' });
+
+    // 3. Remove from local books list
+    state.books = state.books.filter(b => b.id !== recordId);
+
+    // 4. Invalidate cached log data so next view reloads fresh from Airtable
+    //    (state.logData stores bookTitle strings, not IDs — can't filter reliably)
+    //    null triggers the reload check; {} is truthy and would skip it.
+    state.logData = null;
+
+    render();
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+}
+
+// ── Generate tags from manually-entered form fields ────────────────────────
+function generateTagsFromFields() {
+  const get = id => (document.getElementById(id)?.value || '').toLowerCase().trim();
+  const title      = get('bf-title');
+  const author     = get('bf-author');
+  const genre      = get('bf-genre');
+  const category   = get('bf-category');
+  const ageGroup   = get('bf-ageGroup');
+  const montessori = get('bf-montessori');
+  const notes      = document.getElementById('bf-notes')?.value?.toLowerCase() || '';
+  const combined   = [title, genre, category, montessori, notes].join(' ');
+
+  const tagSet = new Set();
+
+  // Genre → tag
+  if (genre) tagSet.add(genre.toLowerCase());
+
+  // Category → tag
+  if (category && category !== 'fiction') tagSet.add(category.toLowerCase());
+
+  // Age group → tag
+  if (ageGroup) tagSet.add(ageGroup);
+
+  // Montessori subject areas
+  const montKeywords = [
+    ['practical life',  /practical.life/],
+    ['sensorial',       /sensorial|senses/],
+    ['language',        /language|literacy|reading|writing|alphabet|abc/],
+    ['math',            /math|numbers|counting|arithmetic|geometry/],
+    ['science',         /science|nature|biology|ecology|animals|plants|earth/],
+    ['cultural',        /culture|cultural|geography|history|world/],
+    ['social emotional',/emotion|feelings|friendship|kindness|empathy|social/],
+    ['music',           /music|songs|rhythm|singing/],
+    ['art',             /art|drawing|painting|colors|colour/],
+  ];
+  for (const [tag, rx] of montKeywords) {
+    if (rx.test(combined)) tagSet.add(tag);
+  }
+
+  // Keywords from title & notes
+  const topicKeywords = [
+    'friendship','family','animals','nature','seasons','diversity','community',
+    'adventure','imagination','kindness','food','transportation','body','environment',
+    'bilingual','spanish','french','mandarin','self-care','bedtime','counting',
+    'alphabet','shapes','colors','weather','ocean','forest','farm','space',
+  ];
+  for (const kw of topicKeywords) {
+    if (combined.includes(kw)) tagSet.add(kw);
+  }
+
+  if (!tagSet.size) {
+    alert('Please fill in at least a title, genre, or Montessori link so tags can be generated.');
+    return;
+  }
+
+  const tagsEl = document.getElementById('bf-tags');
+  if (tagsEl) {
+    const existing = tagsEl.value.split(',').map(t => t.trim()).filter(Boolean);
+    const merged = [...new Set([...existing, ...tagSet])];
+    tagsEl.value = merged.join(', ');
+    // Flash the field to confirm
+    tagsEl.style.borderColor = '#16A34A';
+    setTimeout(() => tagsEl.style.borderColor = '', 1500);
+  }
 }
 
 async function saveBook(formData, recordId) {
@@ -5023,17 +6491,20 @@ function renderBookLibrary() {
     const f = state.bookForm;
     const isEdit = !!f.id;
     const val = (key, fallback='') => f[key] !== undefined ? f[key] : fallback;
-    const genreOptions = ['','Picture Book','Board Book','Chapter Book','Early Reader',
-      'Story Book','Poetry / Nursery Rhymes','Folk Tales / Fairy Tales',
-      'Non-Fiction','Educational / Concept','Science / Nature','Math / Numbers',
-      'Alphabet / ABC','Colors / Shapes','Animals','Music / Songs',
-      'Cultural / World','Reference / Dictionary'].map(g =>
+    // Genre / Category / Age Group values must exactly match Airtable singleSelect options
+    const genreOptions = ['','Picture Book','Read-Aloud','Story Book','Early Reader',
+      'Chapter Book','Board Book','Animal Story','Animals',
+      'Fairy Tale / Fable','Fantasy','Moral Fable','Nursery Rhymes','Music / Songs',
+      'SEL / Family & Relationships','Vehicles & Transport',
+      'Science & Nature','Alphabet & Language','Numbers & Math',
+      'Shapes & Colors','Concepts','Culture & Social Studies',
+      'Activity & Coloring','Dictionary & Reference'].map(g =>
         `<option value="${g}" ${val('genre') === g ? 'selected' : ''}>${g||'— Select —'}</option>`).join('');
-    const catOptions = ['','Fiction','Non-Fiction','Reference','Bilingual / Dual Language',
-      'Poetry / Rhymes','Wordless Book','Activity / Interactive'].map(c =>
+    const catOptions = ['','Fiction','Non-Fiction'].map(c =>
         `<option value="${c}" ${val('category') === c ? 'selected' : ''}>${c||'— Select —'}</option>`).join('');
-    const ageOptions = ['','0–1 yr','1–2 yrs','2–3 yrs','2–4 yrs','3–4 yrs','3–5 yrs',
-      '3–6 yrs','4–5 yrs','4–6 yrs','5–6 yrs','5–8 yrs','6+ yrs','All Ages'].map(a =>
+    const ageOptions = ['','0–2 yrs','0–3 yrs','1–2 yrs','1–3 yrs','1–4 yrs',
+      '2–3 yrs','2–4 yrs','2–5 yrs','3–4 yrs','3–5 yrs','3–8 yrs',
+      '4–5 yrs','4–6 yrs','5–10 yrs'].map(a =>
         `<option value="${a}" ${val('ageGroup') === a ? 'selected' : ''}>${a||'— Select —'}</option>`).join('');
     const fmtOptions = ['','Hardcover','Paperback','Board Book','Big Book','Spiral Bound'].map(fm =>
         `<option value="${fm}" ${val('format') === fm ? 'selected' : ''}>${fm||'— Select —'}</option>`).join('');
@@ -5048,6 +6519,21 @@ function renderBookLibrary() {
           <button onclick="state.bookForm=null;render()" style="background:none;border:none;font-size:18px;cursor:pointer;color:#888">✕</button>
         </div>
         ${state.bookFormError ? `<div class="error-msg">⚠ ${state.bookFormError}</div>` : ''}
+        ${!isEdit ? `
+        <div style="background:#EFF6FF;border:1.5px solid #BFDBFE;border-radius:10px;padding:12px 14px;margin-bottom:16px;">
+          <div style="font-size:12px;font-weight:700;color:#1D4ED8;margin-bottom:8px;">🔍 ISBN Auto-Fill</div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <input type="text" id="bf-isbn-lookup" placeholder="Enter ISBN (10 or 13 digits) and click Look Up"
+              style="flex:1;padding:7px 10px;border:1.5px solid #93C5FD;border-radius:7px;font-size:13px;outline:none;"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();lookupISBN()}"
+              onfocus="this.style.borderColor='#2563EB'" onblur="this.style.borderColor='#93C5FD'">
+            <button onclick="lookupISBN()" id="bf-isbn-lookup-btn"
+              style="padding:7px 14px;background:#2563EB;color:white;border:none;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;min-width:80px;">
+              Look Up
+            </button>
+          </div>
+          <div id="bf-isbn-status" style="font-size:11px;color:#6B7280;margin-top:6px;min-height:16px;"></div>
+        </div>` : ''}
         <div class="book-form-grid">
           <div class="bfg-full book-form-group">
             <label>Title *</label>
@@ -5110,7 +6596,12 @@ function renderBookLibrary() {
             <input type="text" id="bf-montessori" value="${val('montessori').replace(/"/g,'&quot;')}" placeholder="Subject area or concept connection">
           </div>
           <div class="bfg-full book-form-group">
-            <label>Tags</label>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+              <label style="margin-bottom:0">Tags</label>
+              <button type="button" onclick="generateTagsFromFields()"
+                style="padding:3px 10px;font-size:11px;font-weight:700;color:#2563EB;background:#EFF6FF;border:1.5px solid #BFDBFE;border-radius:6px;cursor:pointer;"
+                title="Auto-generate tags from the fields above">✨ Generate Tags</button>
+            </div>
             <input type="text" id="bf-tags" value="${val('tags').replace(/"/g,'&quot;')}" placeholder="Comma-separated tags">
           </div>
           <div class="bfg-full book-form-group">
@@ -5139,9 +6630,12 @@ function renderBookLibrary() {
       <td><span style="font-size:12px;color:#555">${b.genre || '—'}</span></td>
       <td>${b.ageGroup ? `<span class="book-age-badge">${b.ageGroup}</span>` : '—'}</td>
       <td>${catBadge(b.category)}</td>
-      ${isAdmin ? `<td><div class="book-actions">
+      <td><div class="book-actions">
         <button class="book-edit-btn" onclick='openBookEdit(${JSON.stringify(b).replace(/'/g,"&#39;")})'>✏️ Edit</button>
-      </div></td>` : ''}
+        <button class="book-edit-btn" onclick="deleteBook('${b.id}')"
+          style="color:#C62828;border-color:#FFCDD2;" onmouseover="this.style.borderColor='#C62828'"
+          onmouseout="this.style.borderColor='#FFCDD2'">🗑 Delete</button>
+      </div></td>
     </tr>`).join('');
 
   const filtersActive = state.bookSearch || state.bookGenreFilter !== 'All'
@@ -5154,7 +6648,7 @@ function renderBookLibrary() {
         <div style="font-size:20px;font-weight:800;color:#1A1A1A">📚 Books Catalog</div>
         <div style="font-size:12px;color:#888;margin-top:2px">${total} books in the collection</div>
       </div>
-      ${isAdmin ? `<button class="btn btn-primary btn-sm" style="width:auto" onclick="state.bookForm={};render()">+ Add Book</button>` : ''}
+      <button class="btn btn-primary btn-sm" style="width:auto" onclick="state.bookForm={};render()">+ Add Book</button>
     </div>
 
     <!-- KPI Strip -->
@@ -5219,7 +6713,7 @@ function renderBookLibrary() {
             <th style="min-width:150px">Genre</th>
             <th style="min-width:90px">Age Group</th>
             <th style="min-width:120px">Category</th>
-            ${isAdmin ? '<th style="width:80px">Actions</th>' : ''}
+            <th style="width:140px">Actions</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
